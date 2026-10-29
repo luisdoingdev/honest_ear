@@ -1,10 +1,11 @@
 from datetime import timedelta
 
+from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TestCase
 from django.utils import timezone
 
-from .models import Recording
+from .models import FeatureFlag, Recording
 from .tasks import delete_stale_recordings
 from .views import MAX_RECORDING_BYTES
 
@@ -30,6 +31,31 @@ class RecordingApiTests(TestCase):
 
         self.assertEqual(self.client.delete(f"/api/recordings/{data['id']}/").status_code, 204)
         self.assertFalse(Recording.objects.exists())
+
+    def test_logs_each_step_of_a_recording(self):
+        with self.assertLogs("core.views", level="INFO") as logs:
+            data = self.upload().json()
+            self.client.get(data["audio_url"])
+            self.client.delete(f"/api/recordings/{data['id']}/")
+            self.client.delete(f"/api/recordings/{data['id']}/")
+
+        rid = data["id"]
+        self.assertEqual(
+            logs.output,
+            [
+                f"INFO:core.views:Recording {rid} created (1024 bytes, audio/webm)",
+                f"INFO:core.views:Recording {rid} served (1024 bytes)",
+                f"INFO:core.views:Recording {rid} deleted after playback",
+                f"INFO:core.views:Recording {rid} delete requested but already gone",
+            ],
+        )
+
+    def test_logs_rejections_as_warnings(self):
+        with self.assertLogs("core.views", level="WARNING") as logs:
+            self.upload(content_type="text/plain")
+        self.assertEqual(
+            logs.output, ["WARNING:core.views:Recording rejected: unsupported type text/plain (1024 bytes)"]
+        )
 
     def test_deleted_recording_is_gone_and_delete_is_repeatable(self):
         data = self.upload().json()
@@ -59,10 +85,14 @@ class RecordingApiTests(TestCase):
         res = client.post("/api/recordings/", {"audio": audio_file()})
         self.assertEqual(res.status_code, 403)
 
-    def test_record_page_includes_csrf_token(self):
-        res = self.client.get("/record/")
+    def test_home_page_is_the_recorder(self):
+        res = self.client.get("/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, 'name="csrf-token"')
+        self.assertContains(res, "Start session")
+
+    def test_old_record_url_redirects_home(self):
+        self.assertRedirects(self.client.get("/record/"), "/", fetch_redirect_response=False)
 
 
 class StaleRecordingCleanupTests(TestCase):
@@ -71,5 +101,58 @@ class StaleRecordingCleanupTests(TestCase):
         Recording.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(minutes=11))
         fresh = Recording.objects.create(audio=b"new", content_type="audio/webm", size=3)
 
-        self.assertEqual(delete_stale_recordings(), 1)
+        with self.assertLogs("core.tasks", level="WARNING") as logs:
+            self.assertEqual(delete_stale_recordings(), 1)
         self.assertEqual(list(Recording.objects.values_list("pk", flat=True)), [fresh.pk])
+        self.assertIn("Deleted 1 stale recording(s)", logs.output[0])
+
+
+class RecordingFeatureFlagTests(TestCase):
+    def turn_off(self):
+        FeatureFlag.objects.filter(name="recording").update(enabled=False)
+
+    def test_recording_flag_is_on_after_migrations(self):
+        self.assertTrue(FeatureFlag.is_enabled("recording"))
+
+    def test_home_page_hides_recorder_when_off(self):
+        self.turn_off()
+        res = self.client.get("/")
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, "Recording is unavailable right now")
+        self.assertNotContains(res, "Start session")
+        self.assertNotContains(res, "record.js")
+
+    def test_upload_refused_when_off(self):
+        self.turn_off()
+        with self.assertLogs("core.views", level="WARNING") as logs:
+            res = self.client.post("/api/recordings/", {"audio": audio_file()})
+        self.assertEqual(res.status_code, 503)
+        self.assertFalse(Recording.objects.exists())
+        self.assertIn("feature flag is off", logs.output[0])
+
+    def test_existing_recording_can_still_be_played_and_deleted_when_off(self):
+        data = self.client.post("/api/recordings/", {"audio": audio_file()}).json()
+        self.turn_off()
+        self.assertEqual(self.client.get(data["audio_url"]).status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/recordings/{data['id']}/").status_code, 204)
+
+    def test_missing_flag_counts_as_off(self):
+        FeatureFlag.objects.all().delete()
+        self.assertFalse(FeatureFlag.is_enabled("recording"))
+        self.assertEqual(self.client.post("/api/recordings/", {"audio": audio_file()}).status_code, 503)
+
+    def test_admin_can_turn_recording_off_and_it_is_logged(self):
+        admin_user = get_user_model().objects.create_superuser("boss", "boss@example.com", "pw-123456")
+        self.client.force_login(admin_user)
+        flag = FeatureFlag.objects.get(name="recording")
+
+        self.assertContains(self.client.get("/admin/core/featureflag/"), "recording")
+        with self.assertLogs("core.admin", level="WARNING") as logs:
+            res = self.client.post(
+                f"/admin/core/featureflag/{flag.pk}/change/",
+                {"name": "recording", "description": flag.description},
+            )
+        self.assertEqual(res.status_code, 302)
+        self.assertFalse(FeatureFlag.is_enabled("recording"))
+        self.assertEqual(logs.output, ["WARNING:core.admin:Feature flag recording turned off by boss"])
+        self.assertNotContains(self.client.get("/"), "Start session")

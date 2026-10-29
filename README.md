@@ -1,6 +1,6 @@
 # Honest Ear
 
-![Honest Ear landing page](docs/landing.png)
+![Honest Ear home page](docs/home.png)
 
 ## Stack
 
@@ -50,7 +50,7 @@ docker compose exec web python manage.py changepassword admin
 
 ## Recorder
 
-http://localhost:8000/record/ lets anyone record their voice, play it back, and have it deleted:
+The home page, http://localhost:8000/, lets anyone record their voice, play it back, and have it deleted (`/record/` redirects there):
 
 1. **Start session** asks for microphone access.
 2. **Record** / **Stop**: recordings stop automatically at 60 seconds.
@@ -60,6 +60,16 @@ http://localhost:8000/record/ lets anyone record their voice, play it back, and 
 As a safety net, Celery Beat runs `delete_stale_recordings` every minute and removes anything older than 10 minutes, such as recordings from a tab that was closed before playing.
 
 Browsers only allow the microphone over HTTPS or on `localhost`. To try it on your phone, use the deployed HTTPS site; `http://<your-computer's-IP>:8000` won't work. On Render, the cleanup only runs once a Celery worker and Beat are deployed there.
+
+## Feature flags
+
+Flags live in the admin under **Core → Feature flags**. Tick or untick **Enabled** in the list and click **Save**. Changes take effect on the next request and are logged (`Feature flag recording turned off by admin`).
+
+| Flag | Controls |
+| --- | --- |
+| `recording` | The recorder on the home page and new uploads. When off, the page says recording is unavailable and `POST /api/recordings/` returns 503. Recordings already in progress can still be played and deleted. |
+
+The `recording` flag is created switched on by a migration. A flag that doesn't exist counts as off.
 
 ## Tests
 

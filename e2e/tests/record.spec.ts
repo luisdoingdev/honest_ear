@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { overflow, plainVhRules, watchForErrors } from "./helpers";
 
-test.describe("record page", () => {
+test.describe("home page recorder", () => {
   test.beforeEach(async ({ page, browserName }) => {
     if (browserName !== "webkit") return;
     // Playwright's Linux WebKit is built without recording APIs that real iOS Safari has.
@@ -22,10 +22,13 @@ test.describe("record page", () => {
     });
   });
 
-  test("loads and fits the screen", async ({ page }) => {
+  test("loads with styles and fits the screen", async ({ page }) => {
     const assertNoErrors = watchForErrors(page);
-    await page.goto("/record/");
+    await page.goto("/");
 
+    await expect(page).toHaveTitle("Honest Ear");
+    await expect(page.getByRole("heading", { level: 1, name: "Honest Ear" })).toHaveCSS("font-family", /Fraunces/);
+    await expect(page.locator('meta[name="viewport"]')).toHaveAttribute("content", /width=device-width/);
     await expect(page.getByRole("button", { name: "Start session" })).toBeVisible();
     const { sideways, downward } = await overflow(page);
     expect(sideways, "page is wider than the screen").toBeLessThanOrEqual(0);
@@ -36,7 +39,7 @@ test.describe("record page", () => {
   });
 
   test("looks the same as the approved screenshot", async ({ page }) => {
-    await page.goto("/record/");
+    await page.goto("/");
     await page.evaluate(() => document.fonts.ready);
     await expect(page).toHaveScreenshot("record.png", { fullPage: true });
   });
@@ -44,7 +47,7 @@ test.describe("record page", () => {
   test("records, plays back, then deletes the recording", async ({ page, browserName }) => {
     test.skip(browserName !== "chromium", "Playwright can only fake a microphone in Chromium");
     const assertNoErrors = watchForErrors(page);
-    await page.goto("/record/");
+    await page.goto("/");
 
     await page.getByRole("button", { name: "Start session" }).click();
     await page.getByRole("button", { name: "Record", exact: true }).click();
