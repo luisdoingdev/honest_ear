@@ -20,6 +20,9 @@ jobs:
       - name: Start the stack
         run: docker compose up -d --build --wait web
 
+      - name: Run Django tests
+        run: docker compose exec -T web python manage.py test
+
       - name: Run Playwright
         run: docker compose run --rm e2e
 

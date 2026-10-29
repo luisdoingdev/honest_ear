@@ -31,8 +31,10 @@ services:
     entrypoint: ["sh", "/e2e/run.sh"]
     env_file: .env
     environment:
-      BASE_URL: http://web:8000
+      BASE_URL: http://localhost:8000
       CI: ${CI:-}
+    # Share web's network so tests use localhost: browsers only allow the microphone on HTTPS or localhost.
+    network_mode: "service:web"
     ipc: host
     volumes:
       - ./e2e:/e2e

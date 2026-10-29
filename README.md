@@ -48,9 +48,30 @@ docker compose exec web python manage.py changepassword admin
 
 `GET /health/` returns the status of the database and Redis.
 
+## Recorder
+
+http://localhost:8000/record/ lets anyone record their voice, play it back, and have it deleted:
+
+1. **Start session** asks for microphone access.
+2. **Record** / **Stop**: recordings stop automatically at 60 seconds.
+3. The audio is uploaded to `POST /api/recordings/` and stored in Postgres (5 MB max; webm, mp4 or ogg).
+4. **Play** plays it back from the server. When playback ends the page calls `DELETE /api/recordings/<id>/`.
+
+As a safety net, Celery Beat runs `delete_stale_recordings` every minute and removes anything older than 10 minutes, such as recordings from a tab that was closed before playing.
+
+Browsers only allow the microphone over HTTPS or on `localhost`. To try it on your phone, use the deployed HTTPS site; `http://<your-computer's-IP>:8000` won't work. On Render, the cleanup only runs once a Celery worker and Beat are deployed there.
+
 ## Tests
 
 Browser tests use [Playwright](https://playwright.dev) and live in `e2e/`. They run in Docker against the local stack on four devices: desktop Chrome, iPhone 15 and iPhone SE (WebKit, Safari's engine) and Pixel 7. They check that pages load with their styles, don't scroll sideways or overflow on phones, avoid `vh` units in our CSS, still match the approved screenshots, and that the admin login works.
+
+Django unit tests cover the recordings API and cleanup:
+
+```bash
+docker compose exec web python manage.py test
+```
+
+On Chromium devices, Playwright also runs the full record → play → delete flow using a fake microphone. Playwright's WebKit can't record, so the iPhone projects check layout only.
 
 ```bash
 docker compose run --rm e2e                       # run all tests

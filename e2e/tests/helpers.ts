@@ -5,8 +5,6 @@ export function watchForErrors(page: Page) {
   const appOrigin = new URL(process.env.BASE_URL ?? "http://localhost:8000").origin;
   const problems: string[] = [];
   page.on("console", (msg) => {
-    // Chrome ignores Django's COOP header over plain HTTP on non-localhost hosts like http://web:8000.
-    if (msg.text().includes("Cross-Origin-Opener-Policy header has been ignored")) return;
     if (msg.type() === "error") problems.push(`console error: ${msg.text()}`);
   });
   page.on("pageerror", (err) => problems.push(`page error: ${err.message}`));
