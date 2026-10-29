@@ -12,6 +12,11 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
+RUN SECRET_KEY=collectstatic-only \
+    DATABASE_URL=sqlite:///:memory: \
+    REDIS_URL=redis://localhost:6379/0 \
+    python manage.py collectstatic --noinput
+
 RUN useradd --create-home appuser && chown -R appuser /app
 USER appuser
 
