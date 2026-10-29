@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env
+        run: |
+          cp .env.example .env
+          sed -i "s/change-me/$(openssl rand -hex 16)/g" .env
+
+      - name: Start the stack
+        run: docker compose up -d --build --wait web
+
+      - name: Run Playwright
+        run: docker compose run --rm e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+          retention-days: 7
+
+      - name: Show web logs
+        if: failure()
+        run: docker compose logs web

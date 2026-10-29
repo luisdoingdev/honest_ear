@@ -48,6 +48,20 @@ docker compose exec web python manage.py changepassword admin
 
 `GET /health/` returns the status of the database and Redis.
 
+## Tests
+
+Browser tests use [Playwright](https://playwright.dev) and live in `e2e/`. They run in Docker against the local stack on four devices: desktop Chrome, iPhone 15 and iPhone SE (WebKit, Safari's engine) and Pixel 7. They check that pages load with their styles, don't scroll sideways or overflow on phones, avoid `vh` units in our CSS, still match the approved screenshots, and that the admin login works.
+
+```bash
+docker compose run --rm e2e                       # run all tests
+docker compose run --rm e2e --project=iphone-se   # one device only
+docker compose run --rm e2e --update-snapshots    # approve intentional visual changes
+```
+
+After a run, open `e2e/playwright-report/index.html` to see failures with screenshots and traces.
+
+GitHub Actions runs the same suite on every push and pull request. In Render, set **Auto-Deploy** to **After CI Checks Pass** so a failing push is never deployed.
+
 ## Project layout
 
 ```
