@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "connection-url-with-password"
+description = "Database or Redis URL with an embedded password"
+regex = '''(?i)\b(?:postgres(?:ql)?|rediss?|mysql)://[^:@/\s'"]+:([^@/\s'"]{6,})@'''
+secretGroup = 1
+
+[rules.allowlist]
+# Placeholders used in .env.example and the README.
+regexes = ['''^change-me''', '''^<[^>]+>$''', '''^\$\{''']

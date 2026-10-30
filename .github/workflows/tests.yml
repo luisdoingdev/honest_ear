@@ -6,6 +6,20 @@ on:
   pull_request:
 
 jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for committed secrets
+        run: >-
+          docker run --rm -v "$PWD:/repo"
+          -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo
+          zricethezav/gitleaks:v8.21.2 git --config /repo/.gitleaks.toml --redact --no-banner -v /repo
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 20
