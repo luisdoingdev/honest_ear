@@ -15,14 +15,72 @@ logger = logging.getLogger(__name__)
 
 RECORDING_FLAG = "recording"
 TRANSCRIPTION_FLAG = "transcription"
+LIVE_CAPTIONS_FLAG = "live_captions"
 MAX_RECORDING_BYTES = 5 * 1024 * 1024
 ALLOWED_AUDIO_TYPES = {"audio/webm", "audio/mp4", "audio/ogg"}
+# Each token opens a paid Deepgram stream, so anyone hammering the endpoint is cut off per IP.
+LIVE_TOKENS_PER_MINUTE = 10
+
+
+def transcription_enabled():
+    return FeatureFlag.is_enabled(TRANSCRIPTION_FLAG) and transcription.is_configured()
+
+
+def live_captions_enabled():
+    return transcription_enabled() and FeatureFlag.is_enabled(LIVE_CAPTIONS_FLAG)
 
 
 def record(request):
     return render(
-        request, "core/record.html", {"recording_enabled": FeatureFlag.is_enabled(RECORDING_FLAG)}
+        request,
+        "core/record.html",
+        {
+            "recording_enabled": FeatureFlag.is_enabled(RECORDING_FLAG),
+            "live_captions_enabled": live_captions_enabled(),
+        },
     )
+
+
+def client_ip(request):
+    # Render's proxy appends the real client address last; earlier entries can be forged by the client.
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    return forwarded.rsplit(",", 1)[-1].strip() or request.META.get("REMOTE_ADDR", "")
+
+
+def within_live_token_limit(ip):
+    """Counts this IP's tokens in the current minute."""
+    key = f"live-token:{ip}"
+    cache.add(key, 0, timeout=60)
+    return cache.incr(key) <= LIVE_TOKENS_PER_MINUTE
+
+
+@require_POST
+def live_transcription_token(request):
+    unavailable = JsonResponse({"error": _("Live captions are unavailable right now.")}, status=503)
+    if not live_captions_enabled():
+        logger.info("Live captions token refused: turned off or not configured")
+        return unavailable
+
+    ip = client_ip(request)
+    try:
+        allowed = within_live_token_limit(ip)
+    except Exception:
+        # Without the counter there's no limit, so refuse rather than hand out unmetered paid streams.
+        logger.exception("Live captions token refused: rate-limit cache unavailable")
+        return unavailable
+    if not allowed:
+        logger.warning("Live captions token refused: rate limit for %s", ip)
+        return JsonResponse({"error": _("Too many sessions. Try again in a minute.")}, status=429)
+
+    try:
+        stream = transcription.streaming_connection()
+    except transcription.TranscriptionError as exc:
+        logger.warning("Live captions token not issued: %s", exc)
+        return unavailable
+
+    # The token itself is never logged.
+    logger.info("Live captions token issued for %s", ip)
+    return JsonResponse(stream)
 
 
 @require_POST
@@ -49,19 +107,21 @@ def create_recording(request):
         audio=upload.read(), content_type=content_type, size=upload.size
     )
     logger.info("Recording %s created (%d bytes, %s)", recording.id, recording.size, content_type)
+    # The page already has the words from live captions, so a second Deepgram call would only cost twice.
+    if request.POST.get("live_transcript") == "1":
+        logger.info("Recording %s already transcribed live", recording.id)
+        extra = {}
+    else:
+        extra = transcribe_recording(recording)
     return JsonResponse(
-        {
-            "id": str(recording.id),
-            "audio_url": reverse("recording-audio", args=[recording.id]),
-            **transcribe_recording(recording),
-        },
+        {"id": str(recording.id), "audio_url": reverse("recording-audio", args=[recording.id]), **extra},
         status=201,
     )
 
 
 def transcribe_recording(recording):
     """`transcript` is None when transcription is off or failed; the recording is still usable either way."""
-    if not (FeatureFlag.is_enabled(TRANSCRIPTION_FLAG) and transcription.is_configured()):
+    if not transcription_enabled():
         return {"transcript": None}
 
     try:

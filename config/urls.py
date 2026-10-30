@@ -9,6 +9,7 @@ urlpatterns = [
     path("", views.record, name="record"),
     path("record/", RedirectView.as_view(pattern_name="record")),
     path("api/recordings/", views.create_recording, name="recording-create"),
+    path("api/transcription/token/", views.live_transcription_token, name="live-transcription-token"),
     path("api/recordings/<uuid:recording_id>/", views.delete_recording, name="recording-delete"),
     path("api/recordings/<uuid:recording_id>/audio/", views.recording_audio, name="recording-audio"),
     path("jsi18n/", JavaScriptCatalog.as_view(packages=["core"]), name="javascript-catalog"),

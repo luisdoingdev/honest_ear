@@ -70,6 +70,8 @@ CACHES = {
 
 DEEPGRAM_API_KEY = env("DEEPGRAM_API_KEY", default="")
 DEEPGRAM_MODEL = env("DEEPGRAM_MODEL", default="nova-3")
+# Live captions use Flux, Deepgram's turn-based model; "multi" covers Spanish and English.
+DEEPGRAM_STREAMING_MODEL = env("DEEPGRAM_STREAMING_MODEL", default="flux-general-multi")
 
 CELERY_BROKER_URL = env("CELERY_BROKER_URL", default=REDIS_URL)
 CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default=REDIS_URL)

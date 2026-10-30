@@ -55,11 +55,11 @@ docker compose exec web python manage.py changepassword admin
 
 The home page, http://localhost:8000/, lets anyone record their voice, play it back, and have it deleted (`/record/` redirects there):
 
-1. **Start session** asks for microphone access.
-2. **Record** / **Stop**: recordings stop automatically at 60 seconds.
-3. The audio is uploaded to `POST /api/recordings/` and stored in Postgres (5 MB max; webm, mp4 or ogg).
-4. In the same request, the server sends the audio to [Deepgram](https://deepgram.com) (`nova-3`, `language=multi`) and returns the text with the upload. The page shows it under the status line.
-5. **Play** plays it back from the server. When playback ends the page calls `DELETE /api/recordings/<id>/`. The transcript stays on screen.
+There's one mic button, following the "Honest Ear Voice Prototype" design:
+
+1. **Tap the mic** (the first time, the browser asks for microphone access). It moves to the bottom of the screen and a glow rises while it listens. The status counts up, and **live captions** show the last few words as you speak. Recording stops on its own at 60 seconds.
+2. **Tap it again** to stop. A spinner shows while the audio is uploaded to `POST /api/recordings/` and stored in Postgres (5 MB max; webm, mp4 or ogg).
+3. The full transcript fades in, then **Play** appears. Playback comes from the server. When it ends, the page calls `DELETE /api/recordings/<id>/`, and the transcript stays on screen. Tapping the mic again starts a new recording and deletes any unplayed one.
 
 ### Transcription
 
@@ -68,9 +68,24 @@ Set `DEEPGRAM_API_KEY` in `.env` (and in Render) to turn it on; without it, reco
 - The upload response includes `transcript`. It's text, `""` when no speech was heard, or `null` when transcription is off or failed. On failure there's also `transcript_error`, which the page shows. The recording is kept either way.
 - Recordings are sent with Deepgram's `mip_opt_out=true`, so they're excluded from Deepgram's model-improvement program. Transcripts aren't stored, and the logs record only their length, never the words.
 - `language=multi` transcribes Spanish, English, or both mixed in one sentence, whatever the browser's language. The browser language only picks the language of the page and its messages.
-- This uses Deepgram's pre-recorded API: the whole file goes up after **Stop**. Live, word-by-word results while speaking (`interim_results`, `endpointing`) belong to the streaming API. Deepgram rejects them here with HTTP 400, and the log shows its reason. Live results would need a websocket, and therefore ASGI, which is a separate change.
-- Deepgram's call has a 20-second timeout, which keeps it under gunicorn's 30-second request limit. `DEEPGRAM_MODEL` overrides the model.
-- Tests never call Deepgram. The Django tests replace it with fake replies, and Playwright substitutes a transcript in the upload response.
+- If live captions didn't run, the server sends the uploaded file to Deepgram's pre-recorded API after Stop and returns the text with the upload. Streaming-only options (`interim_results`, `endpointing`) don't work on that endpoint: Deepgram rejects them with HTTP 400, and the log shows its reason.
+
+### Live captions
+
+While you speak, the browser streams the microphone straight to **Deepgram Flux**, Deepgram's turn-based live model, and Django stays a plain WSGI app (no ASGI or websockets on the server):
+
+1. On the first tap, the page calls `POST /api/transcription/token/`. Django uses the real API key to get a 30-second token from Deepgram's `/v1/auth/grant`, and returns it with a websocket URL whose options it picked: `wss://api.deepgram.com/v2/listen` (Flux only answers on v2), `model=flux-general-multi` with `language_hint=es` and `language_hint=en` (Spanish, English or a mix), and `mip_opt_out`. v1 options such as `interim_results`, `endpointing` or `smart_format` don't apply to Flux. The API key never reaches the browser, and the token only needs to be valid while the socket opens.
+2. `pcm-worklet.js` turns the microphone into 16 kHz 16-bit PCM in 80 ms chunks, the size Deepgram recommends for Flux. Raw PCM streams the same way on every browser, while the MP4 that iPhones record can't be streamed. MediaRecorder still records the file for playback alongside it.
+3. Flux reports **turns**. Each `TurnInfo` message (`StartOfTurn`, `Update`, `EndOfTurn`, …) carries the whole transcript of one turn so far and its `turn_index`, so the page replaces that turn's text in place. Captions show the last words across turns, and the transcript is all turns joined.
+4. On Stop the page sends `ForceEndTurn`, then `CloseStream`. Closing alone would lose the turn still in progress, because Flux only sends a turn's final text when it ends. The page waits up to 2 seconds for that last `EndOfTurn`, then uploads with `live_transcript=1`, so the server doesn't pay Deepgram a second time.
+
+If anything fails (the `live_captions` flag is off, no token, a socket error), recording works as before and the server transcribes after Stop.
+
+- **The key needs Member permissions** in the Deepgram console; with the default role, `/v1/auth/grant` returns 403 and live captions stay off.
+- Each IP can get 10 tokens a minute. The counter lives in Redis, and if Redis is down no tokens are issued. The IP is the last `X-Forwarded-For` entry, the one Render's proxy adds, because earlier entries can be forged.
+- Logs record when a token is issued or refused, never the token itself.
+- Deepgram's call has a 20-second timeout, which keeps it under gunicorn's 30-second request limit. `DEEPGRAM_MODEL` overrides the after-Stop model (`nova-3`) and `DEEPGRAM_STREAMING_MODEL` the live one (`flux-general-multi`).
+- Tests never call Deepgram. The Django tests replace it with fake replies, and run without the `.env` key so a real key can't make them call it. Playwright fakes the token endpoint and Flux's websocket (`page.routeWebSocket`), checks the audio arrives as 80 ms PCM chunks and that Stop sends `ForceEndTurn` before `CloseStream`, and covers the fall-back path.
 
 As a safety net, Celery Beat runs `delete_stale_recordings` every minute and removes anything older than 10 minutes, such as recordings from a tab that was closed before playing.
 
@@ -86,7 +101,7 @@ The service is described in [`render.yaml`](render.yaml), a Render Blueprint. It
 | --- | --- |
 | `SECRET_KEY` | Render generates it (`generateValue`). Nobody needs to see or copy it. |
 | `DATABASE_URL` | You enter it in Render (`sync: false`). Use the Supabase **Session pooler** URL (port 5432) with `?sslmode=require` on the end. Render is IPv4-only, so the direct connection won't work. URL-encode special characters in the password. |
-| `REDIS_URL` | You enter it in Render. It's the internal URL of a Render Key Value instance, or Upstash. |
+| `REDIS_URL` | Set automatically: `render.yaml` creates a free Key Value (Redis) instance, `honest-ear-redis`, reachable only from your Render services. |
 | `DJANGO_SUPERUSER_EMAIL`, `DJANGO_SUPERUSER_PASSWORD` | You enter them in Render. They're used once, to create the admin; then delete the password from Render. |
 | `DEEPGRAM_API_KEY` | You enter it in Render. Optional: without it, recordings aren't transcribed. |
 | `DJANGO_SUPERUSER_USERNAME`, `DEBUG`, `LOG_LEVEL` | Fixed in `render.yaml` (`admin`, `False`, `INFO`). |
@@ -105,7 +120,7 @@ Don't copy the local `.env` into Render. Its hostnames (`db`, `redis`) only exis
    If you already created the web service by hand, delete it first, or keep it and set the same variables in its **Environment**. Render's `sync: false` prompts only appear when a Blueprint creates a service.
 3. Render deploys automatically. A healthy deploy log shows `Applying ... OK` (or `No migrations to apply`), then `Created superuser`, then `Listening at: http://0.0.0.0:10000`. Later pushes deploy only after CI passes (`autoDeployTrigger: checksPass`).
 4. Open `https://<app>.onrender.com/` and `/admin/`. Then delete `DJANGO_SUPERUSER_PASSWORD` from Render's Environment: the admin already exists, and `ensure_superuser` skips users that do.
-5. `/health/` reports Redis as `error` until `REDIS_URL` points at a real instance. That's why the Render health check uses `/` for now. Once Redis is set, change `healthCheckPath` to `/health/`.
+5. Render's health check calls `/health/`, which checks both Postgres and Redis.
 
 ### Keeping secrets out of the repo
 
@@ -158,9 +173,10 @@ Flags live in the admin under **Core → Feature flags**. Tick or untick **Enabl
 | Flag | Controls |
 | --- | --- |
 | `recording` | The recorder on the home page and new uploads. When off, the page says recording is unavailable and `POST /api/recordings/` returns 503. Recordings already in progress can still be played and deleted. |
-| `transcription` | Sending recordings to Deepgram. When off, uploads return `transcript: null` and no text is shown. It also needs `DEEPGRAM_API_KEY`. |
+| `transcription` | Sending recordings to Deepgram. When off, uploads return `transcript: null`, no text is shown, and live captions are off too. It also needs `DEEPGRAM_API_KEY`. |
+| `live_captions` | Captions while speaking (needs `transcription` and a Member-role key). When off, recordings are transcribed after Stop instead. |
 
-Both flags are created switched on by migrations. A flag that doesn't exist counts as off.
+All flags are created switched on by migrations. A flag that doesn't exist counts as off.
 
 ## Tests
 

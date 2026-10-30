@@ -1,18 +1,24 @@
 import { expect, Page } from "@playwright/test";
 
-/** Fails the test on console errors or broken same-origin requests (CSS, JS, images). */
-export function watchForErrors(page: Page) {
+/**
+ * Fails the test on console errors or broken same-origin requests (CSS, JS, images).
+ * `expected` lists paths a test makes fail on purpose.
+ */
+export function watchForErrors(page: Page, { expected = [] as string[] } = {}) {
   const appOrigin = new URL(process.env.BASE_URL ?? "http://localhost:8000").origin;
   const problems: string[] = [];
   page.on("console", (msg) => {
-    if (msg.type() === "error") problems.push(`console error: ${msg.text()}`);
+    if (msg.type() !== "error") return;
+    // Browsers log a failed request to the console too; skip the ones the test asked for.
+    if (expected.some((path) => msg.location().url.endsWith(path))) return;
+    problems.push(`console error: ${msg.text()}`);
   });
   page.on("pageerror", (err) => problems.push(`page error: ${err.message}`));
   page.on("response", (res) => {
     const url = new URL(res.url());
-    if (url.origin === appOrigin && res.status() >= 400 && url.pathname !== "/favicon.ico") {
-      problems.push(`HTTP ${res.status()} for ${url.pathname}`);
-    }
+    if (url.origin !== appOrigin || res.status() < 400) return;
+    if (url.pathname === "/favicon.ico" || expected.includes(url.pathname)) return;
+    problems.push(`HTTP ${res.status()} for ${url.pathname}`);
   });
   page.on("requestfailed", (req) => problems.push(`request failed: ${req.url()}`));
   return () => expect(problems, problems.join("\n")).toEqual([]);

@@ -1,8 +1,10 @@
 from datetime import timedelta
 from unittest import mock
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TestCase, override_settings
 from django.utils import timezone
@@ -111,7 +113,7 @@ class LanguageTests(OfflineTestCase):
             with self.subTest(header=header):
                 res = self.client.get("/", headers={"accept-language": header})
                 self.assertContains(res, '<html lang="es">')
-                self.assertContains(res, ">Empezar</button>")
+                self.assertContains(res, 'aria-label="Empezar"')
                 self.assertEqual(res["Content-Language"], "es")
 
     def test_other_browsers_get_english(self):
@@ -119,7 +121,7 @@ class LanguageTests(OfflineTestCase):
             with self.subTest(header=header):
                 res = self.client.get("/", headers={"accept-language": header})
                 self.assertContains(res, '<html lang="en">')
-                self.assertContains(res, ">Start session</button>")
+                self.assertContains(res, 'aria-label="Start session"')
 
     def test_varies_by_language_so_caches_keep_them_apart(self):
         res = self.client.get("/", headers={"accept-language": "es-MX"})
@@ -135,7 +137,7 @@ class LanguageTests(OfflineTestCase):
 
     def test_javascript_messages_are_translated(self):
         res = self.client.get("/jsi18n/", headers={"accept-language": "es-MX"})
-        self.assertContains(res, "Grabando")
+        self.assertContains(res, "Escuchando")
 
 
 def deepgram_reply(transcript="", status=200, body=None):
@@ -216,6 +218,111 @@ class TranscriptionTests(TestCase):
         data = self.upload().json()
         self.assertIsNone(data["transcript"])
         self.assertNotIn("transcript_error", data)
+        post.assert_not_called()
+
+
+def grant_reply(status=200, body=None):
+    body = body or {"access_token": "jwt-secret-value", "expires_in": 30}
+    return httpx.Response(status, json=body, request=httpx.Request("POST", "https://api.deepgram.com/v1/auth/grant"))
+
+
+@override_settings(
+    DEEPGRAM_API_KEY="test-key",
+    CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
+)
+@mock.patch("core.transcription.httpx.post")
+class LiveCaptionTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def token(self, **headers):
+        return self.client.post("/api/transcription/token/", headers=headers)
+
+    def test_issues_a_short_lived_token_and_the_server_chosen_stream_url(self, post):
+        post.return_value = grant_reply()
+        data = self.token().json()
+
+        self.assertEqual(data["protocols"], ["bearer", "jwt-secret-value"])
+        url = urlparse(data["url"])
+        # Flux (turn-based) on /v2: v1-only options such as interim_results would make it refuse the stream.
+        self.assertEqual(f"{url.scheme}://{url.netloc}{url.path}", "wss://api.deepgram.com/v2/listen")
+        self.assertEqual(
+            parse_qs(url.query),
+            {
+                "model": ["flux-general-multi"],
+                "language_hint": ["es", "en"],
+                "encoding": ["linear16"],
+                "sample_rate": ["16000"],
+                "mip_opt_out": ["true"],
+            },
+        )
+        call = post.call_args
+        self.assertEqual(call.args, ("https://api.deepgram.com/v1/auth/grant",))
+        self.assertEqual(call.kwargs["headers"], {"Authorization": "Token test-key"})
+        self.assertEqual(call.kwargs["json"], {"ttl_seconds": 30})
+
+    def test_the_token_is_never_logged(self, post):
+        post.return_value = grant_reply()
+        with self.assertLogs("core.views", level="INFO") as logs:
+            self.token()
+        self.assertEqual(logs.output, ["INFO:core.views:Live captions token issued for 127.0.0.1"])
+
+    def test_requires_a_csrf_token(self, post):
+        res = Client(enforce_csrf_checks=True).post("/api/transcription/token/")
+        self.assertEqual(res.status_code, 403)
+        post.assert_not_called()
+
+    def test_unavailable_when_either_flag_is_off(self, post):
+        for flag in ["live_captions", "transcription"]:
+            with self.subTest(flag=flag):
+                FeatureFlag.objects.filter(name=flag).update(enabled=False)
+                self.assertEqual(self.token().status_code, 503)
+                self.assertContains(self.client.get("/"), 'data-live-captions="false"')
+                FeatureFlag.objects.filter(name=flag).update(enabled=True)
+        post.assert_not_called()
+
+    @override_settings(DEEPGRAM_API_KEY="")
+    def test_unavailable_without_an_api_key(self, post):
+        self.assertEqual(self.token().status_code, 503)
+        post.assert_not_called()
+
+    def test_page_offers_live_captions_when_available(self, post):
+        self.assertContains(self.client.get("/"), 'data-live-captions="true"')
+
+    def test_deepgram_refusing_the_grant_is_logged_and_returns_503(self, post):
+        post.return_value = grant_reply(status=403, body={"err_msg": "Insufficient permissions."})
+        with self.assertLogs("core.views", level="WARNING") as logs:
+            res = self.token()
+        self.assertEqual(res.status_code, 503)
+        self.assertNotIn("protocols", res.json())
+        self.assertIn("Deepgram returned HTTP 403: Insufficient permissions.", logs.output[0])
+
+    def test_limits_each_ip_to_ten_tokens_a_minute(self, post):
+        post.return_value = grant_reply()
+        for _ in range(10):
+            self.assertEqual(self.token().status_code, 200)
+        self.assertEqual(self.token().status_code, 429)
+        self.assertEqual(self.token(x_forwarded_for="198.51.100.7").status_code, 200, "other IPs unaffected")
+
+    def test_rate_limit_uses_the_address_renders_proxy_appended(self, post):
+        post.return_value = grant_reply()
+        for _ in range(10):
+            self.token(x_forwarded_for="6.6.6.6, 203.0.113.9")
+        # Forging a different first entry doesn't escape the limit for 203.0.113.9.
+        self.assertEqual(self.token(x_forwarded_for="1.2.3.4, 203.0.113.9").status_code, 429)
+
+    def test_refuses_when_the_rate_limit_cache_is_down(self, post):
+        with mock.patch("core.views.cache.incr", side_effect=ConnectionError("redis down")):
+            with self.assertLogs("core.views", level="ERROR"):
+                self.assertEqual(self.token().status_code, 503)
+        post.assert_not_called()
+
+    def test_upload_with_a_live_transcript_skips_deepgram(self, post):
+        with self.assertLogs("core.views", level="INFO") as logs:
+            res = self.client.post("/api/recordings/", {"audio": audio_file(), "live_transcript": "1"})
+        self.assertEqual(res.status_code, 201)
+        self.assertNotIn("transcript", res.json())
+        self.assertIn("already transcribed live", logs.output[-1])
         post.assert_not_called()
 
 
