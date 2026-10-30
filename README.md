@@ -21,8 +21,10 @@ cp .env.example .env
 Edit `.env` and replace every `change-me` with your own values, then start everything:
 
 ```bash
-docker compose up --build
+./dev.sh
 ```
+
+`dev.sh` is the local counterpart of `start.sh` (which Render runs). It builds the images, starts every service in the background, waits until they're healthy and returns you to the prompt. Follow logs with `docker compose logs -f`; stop everything with `docker compose down`.
 
 The site is at http://localhost:8000. On startup the web container runs migrations and creates the admin user from the `DJANGO_SUPERUSER_*` values in `.env`. Sign in at http://localhost:8000/admin/.
 
