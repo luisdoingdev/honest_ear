@@ -61,6 +61,22 @@ As a safety net, Celery Beat runs `delete_stale_recordings` every minute and rem
 
 Browsers only allow the microphone over HTTPS or on `localhost`. To try it on your phone, use the deployed HTTPS site; `http://<your-computer's-IP>:8000` won't work. On Render, the cleanup only runs once a Celery worker and Beat are deployed there.
 
+## Deploying (Render + Supabase)
+
+The web service on Render builds from the `Dockerfile`. On every start, `start.sh` runs migrations, creates the admin user from `DJANGO_SUPERUSER_*` if it doesn't exist yet, then starts gunicorn on Render's `PORT`. If the database can't be reached, the container exits with an error and Render marks the deploy as failed.
+
+Set these in the Render service's **Environment** (they are not read from `.env`):
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | Supabase **Session pooler** URL (port 5432) with `?sslmode=require` on the end. Render is IPv4-only, so the direct connection won't work. URL-encode special characters in the password. |
+| `REDIS_URL` | Internal URL of a Render Key Value instance (or Upstash). |
+| `SECRET_KEY` | A new random value, not the local one. |
+| `DEBUG` | `False` |
+| `ALLOWED_HOSTS` | Your `*.onrender.com` domain. |
+| `DJANGO_SUPERUSER_USERNAME`, `DJANGO_SUPERUSER_EMAIL`, `DJANGO_SUPERUSER_PASSWORD` | Admin account to create on first deploy. |
+| `LOG_LEVEL` | Optional; defaults to `INFO`. |
+
 ## Feature flags
 
 Flags live in the admin under **Core → Feature flags**. Tick or untick **Enabled** in the list and click **Save**. Changes take effect on the next request and are logged (`Feature flag recording turned off by admin`).
