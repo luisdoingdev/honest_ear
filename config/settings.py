@@ -88,8 +88,7 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-# The language comes from the browser's Accept-Language header (es-MX, es-419, es-AR... all map to "es"),
-# unless the visitor picked one with the switcher, which stores it in the django_language cookie.
+# The language comes from the browser's Accept-Language header (es-CO, es-419, es-MX... all map to "es").
 LANGUAGE_CODE = "en"
 LANGUAGES = [("en", "English"), ("es", "Español")]
 TIME_ZONE = "UTC"

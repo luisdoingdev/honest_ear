@@ -41,10 +41,6 @@ msgid "Recording is unavailable right now. Please check back soon."
 msgstr ""
 "La grabación no está disponible en este momento. Vuelve a intentarlo pronto."
 
-#: templates/core/record.html:33
-msgid "Language"
-msgstr "Idioma"
-
 #: views.py:30
 msgid "Recording is turned off right now."
 msgstr "La grabación está desactivada en este momento."

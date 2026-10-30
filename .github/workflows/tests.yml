@@ -40,8 +40,9 @@ jobs:
       - name: Run Playwright
         run: docker compose run --rm e2e
 
-      - name: Upload Playwright report
-        if: failure()
+      # The HTML report embeds each test's video, so it's uploaded on every run, not only failures.
+      - name: Upload Playwright report and videos
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report

@@ -112,22 +112,9 @@ class LanguageTests(TestCase):
                 self.assertContains(res, '<html lang="en">')
                 self.assertContains(res, ">Start session</button>")
 
-    def test_switcher_names_each_language_in_itself(self):
-        for header in ["es-MX", "en-US"]:
-            with self.subTest(header=header):
-                res = self.client.get("/", headers={"accept-language": header})
-                self.assertContains(res, ">English</button>")
-                self.assertContains(res, ">Español</button>")
-
     def test_varies_by_language_so_caches_keep_them_apart(self):
         res = self.client.get("/", headers={"accept-language": "es-MX"})
         self.assertIn("Accept-Language", res["Vary"])
-
-    def test_switcher_choice_overrides_the_browser(self):
-        res = self.client.post("/i18n/setlang/", {"language": "es", "next": "/"})
-        self.assertRedirects(res, "/", fetch_redirect_response=False)
-        res = self.client.get("/", headers={"accept-language": "en-US"})
-        self.assertContains(res, ">Empezar</button>")
 
     def test_api_errors_are_translated(self):
         res = self.client.post(

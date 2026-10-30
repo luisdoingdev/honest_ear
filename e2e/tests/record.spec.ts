@@ -47,7 +47,7 @@ test.describe("home page recorder", () => {
   test.describe("for a visitor in Colombia", () => {
     test.use({ locale: "es-CO", timezoneId: "America/Bogota" });
 
-    test("shows Spanish and can switch to English", async ({ page }) => {
+    test("shows Spanish", async ({ page }) => {
       const assertNoErrors = watchForErrors(page);
       await page.goto("/");
       await expect(page.locator("html")).toHaveAttribute("lang", "es");
@@ -60,12 +60,6 @@ test.describe("home page recorder", () => {
       const { sideways, downward } = await overflow(page);
       expect(sideways, "page is wider than the screen").toBeLessThanOrEqual(0);
       expect(downward, "page is taller than the screen").toBeLessThanOrEqual(0);
-
-      // Switching reloads the page, which would cancel a font download still in flight.
-      await page.evaluate(() => document.fonts.ready);
-      await page.getByRole("button", { name: "English" }).click();
-      await expect(page.getByRole("button", { name: "Start session" })).toBeVisible();
-      await expect(page.locator("html")).toHaveAttribute("lang", "en");
       assertNoErrors();
     });
   });

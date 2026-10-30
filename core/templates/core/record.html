@@ -30,14 +30,5 @@
       <p class="status" role="status">{% translate "Recording is unavailable right now. Please check back soon." %}</p>
     {% endif %}
   </main>
-  <form class="language" action="{% url 'set_language' %}" method="post" aria-label="{% translate 'Language' %}">
-    {% csrf_token %}
-    <input type="hidden" name="next" value="{{ request.get_full_path }}">
-    {% get_available_languages as available %}
-    {% get_language_info_list for available as languages %}
-    {% for language in languages %}
-      <button type="submit" name="language" value="{{ language.code }}" lang="{{ language.code }}"{% if language.code == LANGUAGE_CODE %} aria-current="true"{% endif %}>{{ language.name_local|capfirst }}</button>
-    {% endfor %}
-  </form>
 </body>
 </html>

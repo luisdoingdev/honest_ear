@@ -115,7 +115,7 @@ Don't copy the local `.env` into Render. Its hostnames (`db`, `redis`) only exis
 
 ## Languages
 
-The site is in English and Spanish, aimed at Colombia (Bogotá and Medellín). Each visitor gets the language their browser asks for: `es-CO`, `es-419`, `es-MX` and any other `es-*` get Spanish, and everyone else gets English. There's no IP or geolocation lookup, because the browser language is what the person actually reads. The **English · Español** switch at the bottom of the page overrides the browser and is remembered in the `django_language` cookie. The Django admin follows the same choice.
+The site is in English and Spanish, aimed at Colombia (Bogotá and Medellín). Each visitor gets the language their browser asks for: `es-CO`, `es-419`, `es-MX` and any other `es-*` get Spanish, and everyone else gets English. There's no IP or geolocation lookup, because the browser language is what the person actually reads. The Django admin follows the same choice.
 
 Translations live in `core/locale/es/LC_MESSAGES/`:
 
@@ -169,7 +169,20 @@ docker compose run --rm e2e --update-snapshots    # approve intentional visual c
 
 After a run, open `e2e/playwright-report/index.html` to see failures with screenshots and traces.
 
-GitHub Actions runs the same suite on every push and pull request. In Render, set **Auto-Deploy** to **After CI Checks Pass** so a failing push is never deployed.
+To watch the tests in a real browser, run Playwright on your Mac against the running stack (`./dev.sh` first). The one-time setup needs Node:
+
+```bash
+cd e2e && npm ci && npx playwright install chromium webkit
+```
+
+```bash
+npm run ui         # Playwright's UI mode: pick tests, watch them, step through each action
+npm run headed     # run everything in visible browser windows, one at a time
+```
+
+Screenshot baselines made on the Mac are saved as `*-darwin.png`, separate from Docker's `*-linux.png`.
+
+GitHub Actions runs the same suite on every push and pull request, recording a video of every browser test. To watch them, open the run on GitHub, download the **playwright-report** artifact from the run's Summary page (it's kept for 7 days), unzip it, and run `npx playwright show-report playwright-report` from the unzipped folder. Each test has its video, and failures also have a screenshot and trace. Locally, videos are kept only for failing tests. In Render, set **Auto-Deploy** to **After CI Checks Pass** so a failing push is never deployed.
 
 ## Project layout
 
