@@ -20,6 +20,7 @@
     {% if recording_enabled %}
       <p id="status" class="status" role="status" aria-live="polite">{% translate "Start a session to record your voice." %}</p>
       <p id="timer" class="timer" hidden>0:00</p>
+      <blockquote id="transcript" class="transcript" hidden></blockquote>
       <div class="controls">
         <button id="start" class="btn" type="button">{% translate "Start session" %}</button>
         <button id="record" class="btn" type="button" hidden>{% translate "Record" %}</button>

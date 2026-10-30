@@ -1,20 +1,29 @@
 from datetime import timedelta
+from unittest import mock
 
+import httpx
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 
 from .models import FeatureFlag, Recording
 from .tasks import delete_stale_recordings
+from .transcription import DEEPGRAM_URL
 from .views import MAX_RECORDING_BYTES
+
+
+# A real DEEPGRAM_API_KEY in .env must never make tests call (and bill) Deepgram.
+@override_settings(DEEPGRAM_API_KEY="")
+class OfflineTestCase(TestCase):
+    pass
 
 
 def audio_file(size=1024, content_type="audio/webm"):
     return SimpleUploadedFile("recording", b"\x01" * size, content_type=content_type)
 
 
-class RecordingApiTests(TestCase):
+class RecordingApiTests(OfflineTestCase):
     def upload(self, **kwargs):
         return self.client.post("/api/recordings/", {"audio": audio_file(**kwargs)})
 
@@ -95,7 +104,7 @@ class RecordingApiTests(TestCase):
         self.assertRedirects(self.client.get("/record/"), "/", fetch_redirect_response=False)
 
 
-class LanguageTests(TestCase):
+class LanguageTests(OfflineTestCase):
     def test_spanish_browsers_get_spanish(self):
         # es-CO (Colombia: Bogotá, Medellín) is the main audience.
         for header in ["es-CO,es;q=0.9", "es-CO", "es-419", "es-MX", "es"]:
@@ -129,7 +138,88 @@ class LanguageTests(TestCase):
         self.assertContains(res, "Grabando")
 
 
-class StaleRecordingCleanupTests(TestCase):
+def deepgram_reply(transcript="", status=200, body=None):
+    body = body or {"results": {"channels": [{"alternatives": [{"transcript": transcript}]}]}}
+    return httpx.Response(status, json=body, request=httpx.Request("POST", DEEPGRAM_URL))
+
+
+@override_settings(DEEPGRAM_API_KEY="test-key")
+@mock.patch("core.transcription.httpx.post")
+class TranscriptionTests(TestCase):
+    def upload(self, language="es-CO"):
+        return self.client.post(
+            "/api/recordings/", {"audio": audio_file()}, headers={"accept-language": language}
+        )
+
+    def test_upload_returns_the_transcript(self, post):
+        post.return_value = deepgram_reply("Hola, ¿cómo estás?")
+        res = self.upload()
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["transcript"], "Hola, ¿cómo estás?")
+
+    def test_every_browser_is_transcribed_in_multi_and_opted_out_of_training(self, post):
+        post.return_value = deepgram_reply("hi")
+        self.upload(language="es-CO")
+        self.upload(language="en-US")
+
+        for call in post.call_args_list:
+            self.assertEqual(call.args, (DEEPGRAM_URL,))
+            self.assertEqual(
+                call.kwargs["params"],
+                {"model": "nova-3", "language": "multi", "smart_format": "true", "mip_opt_out": "true"},
+            )
+            self.assertEqual(call.kwargs["headers"]["Authorization"], "Token test-key")
+            self.assertEqual(call.kwargs["headers"]["Content-Type"], "audio/webm")
+            self.assertEqual(call.kwargs["content"], b"\x01" * 1024)
+
+    def test_deepgrams_reason_for_rejecting_a_request_is_logged(self, post):
+        post.return_value = deepgram_reply(status=400, body={"err_msg": "Bad Request: bad option"})
+        with self.assertLogs("core.views", level="WARNING") as logs:
+            self.assertIsNone(self.upload().json()["transcript"])
+        self.assertIn("Deepgram returned HTTP 400: Bad Request: bad option", logs.output[0])
+
+    def test_silence_returns_an_empty_transcript(self, post):
+        post.return_value = deepgram_reply("")
+        self.assertEqual(self.upload().json()["transcript"], "")
+
+    def test_transcript_text_is_never_logged(self, post):
+        post.return_value = deepgram_reply("my private words")
+        with self.assertLogs("core.views", level="INFO") as logs:
+            rid = self.upload().json()["id"]
+        self.assertIn(f"INFO:core.views:Recording {rid} transcribed (multi, 16 characters)", logs.output)
+        self.assertNotIn("private", "\n".join(logs.output))
+
+    def test_deepgram_down_still_keeps_the_recording(self, post):
+        post.side_effect = httpx.ConnectError("boom")
+        with self.assertLogs("core.views", level="WARNING") as logs:
+            res = self.upload()
+        data = res.json()
+        self.assertEqual(res.status_code, 201)
+        self.assertIsNone(data["transcript"])
+        self.assertEqual(data["transcript_error"], "No se pudo transcribir esta grabación.")
+        self.assertEqual(self.client.get(data["audio_url"]).status_code, 200)
+        self.assertIn("Deepgram request failed: ConnectError", logs.output[0])
+
+    def test_deepgram_rejecting_the_key_is_logged_with_its_status(self, post):
+        post.return_value = deepgram_reply(status=401)
+        with self.assertLogs("core.views", level="WARNING") as logs:
+            self.assertIsNone(self.upload().json()["transcript"])
+        self.assertIn("Deepgram returned HTTP 401", logs.output[0])
+
+    def test_flag_off_skips_deepgram(self, post):
+        FeatureFlag.objects.filter(name="transcription").update(enabled=False)
+        self.assertIsNone(self.upload().json()["transcript"])
+        post.assert_not_called()
+
+    @override_settings(DEEPGRAM_API_KEY="")
+    def test_no_api_key_skips_deepgram(self, post):
+        data = self.upload().json()
+        self.assertIsNone(data["transcript"])
+        self.assertNotIn("transcript_error", data)
+        post.assert_not_called()
+
+
+class StaleRecordingCleanupTests(OfflineTestCase):
     def test_deletes_only_old_recordings(self):
         old = Recording.objects.create(audio=b"old", content_type="audio/webm", size=3)
         Recording.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(minutes=11))
@@ -141,7 +231,7 @@ class StaleRecordingCleanupTests(TestCase):
         self.assertIn("Deleted 1 stale recording(s)", logs.output[0])
 
 
-class RecordingFeatureFlagTests(TestCase):
+class RecordingFeatureFlagTests(OfflineTestCase):
     def turn_off(self):
         FeatureFlag.objects.filter(name="recording").update(enabled=False)
 

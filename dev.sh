@@ -10,4 +10,4 @@ fi
 
 docker compose up -d --build --wait
 echo "Honest Ear is running at http://localhost:8000"
-echo "Logs: docker compose logs -f    Stop: docker compose down"
+echo "Logs: docker compose logs -f    Stop: ./stop.sh    Fresh start: ./stop.sh --reset && ./dev.sh"

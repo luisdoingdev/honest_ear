@@ -24,7 +24,7 @@ Edit `.env` and replace every `change-me` with your own values, then start every
 ./dev.sh
 ```
 
-`dev.sh` is the local counterpart of `start.sh` (which Render runs). It builds the images, starts every service in the background, waits until they're healthy and returns you to the prompt. Follow logs with `docker compose logs -f`; stop everything with `docker compose down`.
+`dev.sh` is the local counterpart of `start.sh` (which Render runs). It builds the images, starts every service in the background, waits until they're healthy and returns you to the prompt. Follow logs with `docker compose logs -f`. `./stop.sh` stops and removes the containers but keeps your data; `./stop.sh --reset` also wipes the database and Redis, so `./stop.sh --reset && ./dev.sh` starts from scratch.
 
 The site is at http://localhost:8000. On startup the web container runs migrations and creates the admin user from the `DJANGO_SUPERUSER_*` values in `.env`. Sign in at http://localhost:8000/admin/.
 
@@ -42,7 +42,8 @@ The site is at http://localhost:8000. On startup the web container runs migratio
 
 ```bash
 docker compose up -d && docker compose logs -f   # start in background and follow logs
-docker compose down                              # stop everything
+./stop.sh                                        # stop everything (data kept)
+./stop.sh --reset && ./dev.sh                    # start from scratch: wipes the local database
 docker compose exec web bash                     # shell inside the web container
 docker compose exec web python manage.py shell   # Django shell
 docker compose exec web python manage.py changepassword admin
@@ -57,7 +58,19 @@ The home page, http://localhost:8000/, lets anyone record their voice, play it b
 1. **Start session** asks for microphone access.
 2. **Record** / **Stop**: recordings stop automatically at 60 seconds.
 3. The audio is uploaded to `POST /api/recordings/` and stored in Postgres (5 MB max; webm, mp4 or ogg).
-4. **Play** plays it back from the server. When playback ends the page calls `DELETE /api/recordings/<id>/`.
+4. In the same request, the server sends the audio to [Deepgram](https://deepgram.com) (`nova-3`, `language=multi`) and returns the text with the upload. The page shows it under the status line.
+5. **Play** plays it back from the server. When playback ends the page calls `DELETE /api/recordings/<id>/`. The transcript stays on screen.
+
+### Transcription
+
+Set `DEEPGRAM_API_KEY` in `.env` (and in Render) to turn it on; without it, recording works and no text is shown. The admin's `transcription` feature flag switches it off without removing the key.
+
+- The upload response includes `transcript`. It's text, `""` when no speech was heard, or `null` when transcription is off or failed. On failure there's also `transcript_error`, which the page shows. The recording is kept either way.
+- Recordings are sent with Deepgram's `mip_opt_out=true`, so they're excluded from Deepgram's model-improvement program. Transcripts aren't stored, and the logs record only their length, never the words.
+- `language=multi` transcribes Spanish, English, or both mixed in one sentence, whatever the browser's language. The browser language only picks the language of the page and its messages.
+- This uses Deepgram's pre-recorded API: the whole file goes up after **Stop**. Live, word-by-word results while speaking (`interim_results`, `endpointing`) belong to the streaming API. Deepgram rejects them here with HTTP 400, and the log shows its reason. Live results would need a websocket, and therefore ASGI, which is a separate change.
+- Deepgram's call has a 20-second timeout, which keeps it under gunicorn's 30-second request limit. `DEEPGRAM_MODEL` overrides the model.
+- Tests never call Deepgram. The Django tests replace it with fake replies, and Playwright substitutes a transcript in the upload response.
 
 As a safety net, Celery Beat runs `delete_stale_recordings` every minute and removes anything older than 10 minutes, such as recordings from a tab that was closed before playing.
 
@@ -75,6 +88,7 @@ The service is described in [`render.yaml`](render.yaml), a Render Blueprint. It
 | `DATABASE_URL` | You enter it in Render (`sync: false`). Use the Supabase **Session pooler** URL (port 5432) with `?sslmode=require` on the end. Render is IPv4-only, so the direct connection won't work. URL-encode special characters in the password. |
 | `REDIS_URL` | You enter it in Render. It's the internal URL of a Render Key Value instance, or Upstash. |
 | `DJANGO_SUPERUSER_EMAIL`, `DJANGO_SUPERUSER_PASSWORD` | You enter them in Render. They're used once, to create the admin; then delete the password from Render. |
+| `DEEPGRAM_API_KEY` | You enter it in Render. Optional: without it, recordings aren't transcribed. |
 | `DJANGO_SUPERUSER_USERNAME`, `DEBUG`, `LOG_LEVEL` | Fixed in `render.yaml` (`admin`, `False`, `INFO`). |
 | `ALLOWED_HOSTS` | Not needed. Django adds Render's own `RENDER_EXTERNAL_HOSTNAME` automatically. Set it only for a custom domain. |
 
@@ -144,8 +158,9 @@ Flags live in the admin under **Core → Feature flags**. Tick or untick **Enabl
 | Flag | Controls |
 | --- | --- |
 | `recording` | The recorder on the home page and new uploads. When off, the page says recording is unavailable and `POST /api/recordings/` returns 503. Recordings already in progress can still be played and deleted. |
+| `transcription` | Sending recordings to Deepgram. When off, uploads return `transcript: null` and no text is shown. It also needs `DEEPGRAM_API_KEY`. |
 
-The `recording` flag is created switched on by a migration. A flag that doesn't exist counts as off.
+Both flags are created switched on by migrations. A flag that doesn't exist counts as off.
 
 ## Tests
 

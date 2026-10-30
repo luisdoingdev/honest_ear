@@ -6,6 +6,7 @@
   const buttons = { start: $("start"), record: $("record"), stop: $("stop"), play: $("play") };
   const statusEl = $("status");
   const timerEl = $("timer");
+  const transcriptEl = $("transcript");
   const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
   const audio = new Audio();
 
@@ -22,6 +23,14 @@
   function setStatus(text, isError = false) {
     statusEl.textContent = text;
     statusEl.classList.toggle("status-error", isError);
+  }
+
+  // transcript is null when transcription is off or failed (then error explains why).
+  function showTranscript(transcript, error) {
+    const text = transcript || error || (transcript === "" ? gettext("No speech detected.") : "");
+    transcriptEl.textContent = text;
+    transcriptEl.classList.toggle("transcript-empty", !transcript);
+    transcriptEl.hidden = !text;
   }
 
   function startTimer() {
@@ -72,6 +81,7 @@
       });
       if (!created.ok) throw new Error(await errorMessage(created));
       recording = await created.json();
+      showTranscript(recording.transcript ?? null, recording.transcript_error);
 
       // Download now so the Play tap can start playback immediately (iOS requires that).
       const downloaded = await fetch(recording.audio_url, { cache: "no-store" });
@@ -117,6 +127,7 @@
     recorder.addEventListener("dataavailable", (e) => e.data.size && chunks.push(e.data));
     recorder.addEventListener("stop", upload);
     recorder.start();
+    transcriptEl.hidden = true;
     startTimer();
     setStatus(gettext("Recording…"));
     show("stop");

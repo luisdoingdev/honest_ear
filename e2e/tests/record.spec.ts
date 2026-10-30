@@ -64,6 +64,33 @@ test.describe("home page recorder", () => {
     });
   });
 
+  test("shows the transcript that comes back with the upload", async ({ page, browserName }) => {
+    test.skip(browserName !== "chromium", "Playwright can only fake a microphone in Chromium");
+    const assertNoErrors = watchForErrors(page);
+    const words = "Esto es una prueba de transcripción. ".repeat(12).trim();
+    // Deepgram is called by the server, so stand in its result on the real upload response.
+    await page.route("**/api/recordings/", async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...(await response.json()), transcript: words } });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Start session" }).click();
+    await page.getByRole("button", { name: "Record", exact: true }).click();
+    await expect(page.locator("#timer")).toHaveText("0:01");
+    await page.getByRole("button", { name: "Stop" }).click();
+
+    await expect(page.locator("#transcript")).toHaveText(words);
+    const { sideways } = await overflow(page);
+    expect(sideways, "page is wider than the screen").toBeLessThanOrEqual(0);
+
+    const deleteDone = page.waitForResponse((res) => res.request().method() === "DELETE");
+    await page.getByRole("button", { name: "Play" }).click();
+    await deleteDone;
+    await expect(page.locator("#transcript"), "transcript stays after playback").toHaveText(words);
+    assertNoErrors();
+  });
+
   test("records, plays back, then deletes the recording", async ({ page, browserName }) => {
     test.skip(browserName !== "chromium", "Playwright can only fake a microphone in Chromium");
     const assertNoErrors = watchForErrors(page);

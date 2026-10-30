@@ -8,11 +8,13 @@ from django.urls import reverse
 from django.utils.translation import gettext as _
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from . import transcription
 from .models import FeatureFlag, Recording
 
 logger = logging.getLogger(__name__)
 
 RECORDING_FLAG = "recording"
+TRANSCRIPTION_FLAG = "transcription"
 MAX_RECORDING_BYTES = 5 * 1024 * 1024
 ALLOWED_AUDIO_TYPES = {"audio/webm", "audio/mp4", "audio/ogg"}
 
@@ -48,9 +50,31 @@ def create_recording(request):
     )
     logger.info("Recording %s created (%d bytes, %s)", recording.id, recording.size, content_type)
     return JsonResponse(
-        {"id": str(recording.id), "audio_url": reverse("recording-audio", args=[recording.id])},
+        {
+            "id": str(recording.id),
+            "audio_url": reverse("recording-audio", args=[recording.id]),
+            **transcribe_recording(recording),
+        },
         status=201,
     )
+
+
+def transcribe_recording(recording):
+    """`transcript` is None when transcription is off or failed; the recording is still usable either way."""
+    if not (FeatureFlag.is_enabled(TRANSCRIPTION_FLAG) and transcription.is_configured()):
+        return {"transcript": None}
+
+    try:
+        text = transcription.transcribe(bytes(recording.audio), recording.content_type)
+    except transcription.TranscriptionError as exc:
+        logger.warning("Recording %s not transcribed: %s", recording.id, exc)
+        return {"transcript": None, "transcript_error": _("Couldn't transcribe this recording.")}
+
+    # Only the length is logged: the words themselves are the visitor's private speech.
+    logger.info(
+        "Recording %s transcribed (%s, %d characters)", recording.id, transcription.LANGUAGE, len(text)
+    )
+    return {"transcript": text}
 
 
 @require_GET

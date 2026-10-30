@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Honest Ear\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 17:29+0000\n"
+"POT-Creation-Date: 2026-10-30 18:42+0000\n"
 "PO-Revision-Date: 2026-10-30 17:30+0000\n"
 "Last-Translator: Honest Ear\n"
 "Language-Team: Spanish\n"
@@ -20,40 +20,44 @@ msgid "Start a session to record your voice."
 msgstr "Empieza una sesión para grabar tu voz."
 
 #  "Iniciar sesión" would read as "Log in", so this says "Begin".
-#: templates/core/record.html:24
+#: templates/core/record.html:25
 msgid "Start session"
 msgstr "Empezar"
 
-#: templates/core/record.html:25
+#: templates/core/record.html:26
 msgid "Record"
 msgstr "Grabar"
 
-#: templates/core/record.html:26
+#: templates/core/record.html:27
 msgid "Stop"
 msgstr "Detener"
 
-#: templates/core/record.html:27
+#: templates/core/record.html:28
 msgid "Play"
 msgstr "Reproducir"
 
-#: templates/core/record.html:30
+#: templates/core/record.html:31
 msgid "Recording is unavailable right now. Please check back soon."
 msgstr ""
 "La grabación no está disponible en este momento. Vuelve a intentarlo pronto."
 
-#: views.py:30
+#: views.py:33
 msgid "Recording is turned off right now."
 msgstr "La grabación está desactivada en este momento."
 
-#: views.py:35
+#: views.py:38
 msgid "No audio was uploaded."
 msgstr "No se subió ningún audio."
 
-#: views.py:40
+#: views.py:43
 #, python-format
 msgid "Unsupported audio type: %(type)s"
 msgstr "Tipo de audio no compatible: %(type)s"
 
-#: views.py:44
+#: views.py:47
 msgid "Recording is too large (5 MB max)."
 msgstr "La grabación es demasiado grande (máximo 5 MB)."
+
+#: views.py:73
+msgid "Couldn't transcribe this recording."
+msgstr "No se pudo transcribir esta grabación."
