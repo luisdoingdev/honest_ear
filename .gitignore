@@ -4,3 +4,8 @@ __pycache__/
 staticfiles/
 .venv/
 celerybeat-schedule*
+
+# Playwight Gens
+node_modules/
+test-results/
+playwright-report/
