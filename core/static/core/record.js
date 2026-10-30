@@ -58,7 +58,7 @@
   async function upload() {
     stopTimer();
     show();
-    setStatus("Uploading…");
+    setStatus(gettext("Uploading…"));
 
     const type = recorder.mimeType || chunks[0]?.type || "audio/webm";
     const form = new FormData();
@@ -79,23 +79,23 @@
       if (audio.src) URL.revokeObjectURL(audio.src);
       audio.src = URL.createObjectURL(await downloaded.blob());
 
-      setStatus("Uploaded. Tap Play to hear it. It's deleted when it finishes.");
+      setStatus(gettext("Uploaded. Tap Play to hear it. It's deleted when it finishes."));
       show("play");
     } catch (err) {
       await deleteRecording();
-      setStatus(`Upload failed: ${err.message}`, true);
+      setStatus(interpolate(gettext("Upload failed: %s"), [err.message]), true);
       show("record");
     }
   }
 
   if (!window.isSecureContext) {
-    setStatus("Recording needs a secure connection. Open this page over HTTPS.", true);
+    setStatus(gettext("Recording needs a secure connection. Open this page over HTTPS."), true);
     show();
     return;
   }
 
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-    setStatus("This browser can't record audio. Try a recent Chrome or Safari.", true);
+    setStatus(gettext("This browser can't record audio. Try a recent Chrome or Safari."), true);
     show();
     return;
   }
@@ -103,10 +103,10 @@
   buttons.start.addEventListener("click", async () => {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      setStatus("Ready. Tap Record when you are.");
+      setStatus(gettext("Ready. Tap Record when you are."));
       show("record");
     } catch {
-      setStatus("Microphone access was denied. Allow it in your browser settings and try again.", true);
+      setStatus(gettext("Microphone access was denied. Allow it in your browser settings and try again."), true);
     }
   });
 
@@ -118,7 +118,7 @@
     recorder.addEventListener("stop", upload);
     recorder.start();
     startTimer();
-    setStatus("Recording…");
+    setStatus(gettext("Recording…"));
     show("stop");
   });
 
@@ -128,9 +128,9 @@
 
   buttons.play.addEventListener("click", () => {
     show();
-    setStatus("Playing…");
+    setStatus(gettext("Playing…"));
     audio.play().catch(() => {
-      setStatus("Couldn't play the recording.", true);
+      setStatus(gettext("Couldn't play the recording."), true);
       show("play");
     });
   });
@@ -140,11 +140,11 @@
     audio.removeAttribute("src");
     try {
       await deleteRecording();
-      setStatus("Deleted. Record again?");
+      setStatus(gettext("Deleted. Record again?"));
     } catch {
-      setStatus("Played, but deleting failed. It will be removed automatically.", true);
+      setStatus(gettext("Played, but deleting failed. It will be removed automatically."), true);
     }
-    buttons.record.textContent = "Record again";
+    buttons.record.textContent = gettext("Record again");
     show("record");
   });
 })();

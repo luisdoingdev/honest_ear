@@ -1,0 +1,63 @@
+# Spanish translations for Honest Ear (templates and API messages).
+# Neutral Latin American Spanish, informal "tú".
+msgid ""
+msgstr ""
+"Project-Id-Version: Honest Ear\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-30 17:29+0000\n"
+"PO-Revision-Date: 2026-10-30 17:30+0000\n"
+"Last-Translator: Honest Ear\n"
+"Language-Team: Spanish\n"
+"Language: es\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=n == 1 ? 0 : n != 0 && n % 1000000 == 0 ? "
+"1 : 2;\n"
+
+#: templates/core/record.html:21
+msgid "Start a session to record your voice."
+msgstr "Empieza una sesión para grabar tu voz."
+
+#  "Iniciar sesión" would read as "Log in", so this says "Begin".
+#: templates/core/record.html:24
+msgid "Start session"
+msgstr "Empezar"
+
+#: templates/core/record.html:25
+msgid "Record"
+msgstr "Grabar"
+
+#: templates/core/record.html:26
+msgid "Stop"
+msgstr "Detener"
+
+#: templates/core/record.html:27
+msgid "Play"
+msgstr "Reproducir"
+
+#: templates/core/record.html:30
+msgid "Recording is unavailable right now. Please check back soon."
+msgstr ""
+"La grabación no está disponible en este momento. Vuelve a intentarlo pronto."
+
+#: templates/core/record.html:33
+msgid "Language"
+msgstr "Idioma"
+
+#: views.py:30
+msgid "Recording is turned off right now."
+msgstr "La grabación está desactivada en este momento."
+
+#: views.py:35
+msgid "No audio was uploaded."
+msgstr "No se subió ningún audio."
+
+#: views.py:40
+#, python-format
+msgid "Unsupported audio type: %(type)s"
+msgstr "Tipo de audio no compatible: %(type)s"
+
+#: views.py:44
+msgid "Recording is too large (5 MB max)."
+msgstr "La grabación es demasiado grande (máximo 5 MB)."

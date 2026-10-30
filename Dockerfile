@@ -7,6 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# gettext provides the tools behind makemessages and compilemessages.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gettext \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
@@ -15,7 +20,7 @@ COPY . .
 RUN SECRET_KEY=collectstatic-only \
     DATABASE_URL=sqlite:///:memory: \
     REDIS_URL=redis://localhost:6379/0 \
-    python manage.py collectstatic --noinput
+    sh -c "python manage.py collectstatic --noinput && python manage.py compilemessages"
 
 RUN useradd --create-home appuser && chown -R appuser /app
 USER appuser

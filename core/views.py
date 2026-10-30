@@ -5,6 +5,7 @@ from django.db import connection
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.urls import reverse
+from django.utils.translation import gettext as _
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from .models import FeatureFlag, Recording
@@ -26,20 +27,21 @@ def record(request):
 def create_recording(request):
     if not FeatureFlag.is_enabled(RECORDING_FLAG):
         logger.warning("Recording rejected: the %s feature flag is off", RECORDING_FLAG)
-        return JsonResponse({"error": "Recording is turned off right now."}, status=503)
+        return JsonResponse({"error": _("Recording is turned off right now.")}, status=503)
 
     upload = request.FILES.get("audio")
     if upload is None or upload.size == 0:
         logger.warning("Recording rejected: no audio uploaded")
-        return JsonResponse({"error": "No audio was uploaded."}, status=400)
+        return JsonResponse({"error": _("No audio was uploaded.")}, status=400)
 
     content_type = upload.content_type.split(";")[0].strip().lower()
     if content_type not in ALLOWED_AUDIO_TYPES:
         logger.warning("Recording rejected: unsupported type %s (%d bytes)", content_type, upload.size)
-        return JsonResponse({"error": f"Unsupported audio type: {content_type}"}, status=415)
+        message = _("Unsupported audio type: %(type)s") % {"type": content_type}
+        return JsonResponse({"error": message}, status=415)
     if upload.size > MAX_RECORDING_BYTES:
         logger.warning("Recording rejected: too large (%d bytes, type %s)", upload.size, content_type)
-        return JsonResponse({"error": "Recording is too large (5 MB max)."}, status=413)
+        return JsonResponse({"error": _("Recording is too large (5 MB max).")}, status=413)
 
     recording = Recording.objects.create(
         audio=upload.read(), content_type=content_type, size=upload.size

@@ -95,6 +95,53 @@ class RecordingApiTests(TestCase):
         self.assertRedirects(self.client.get("/record/"), "/", fetch_redirect_response=False)
 
 
+class LanguageTests(TestCase):
+    def test_spanish_browsers_get_spanish(self):
+        # es-CO (Colombia: Bogotá, Medellín) is the main audience.
+        for header in ["es-CO,es;q=0.9", "es-CO", "es-419", "es-MX", "es"]:
+            with self.subTest(header=header):
+                res = self.client.get("/", headers={"accept-language": header})
+                self.assertContains(res, '<html lang="es">')
+                self.assertContains(res, ">Empezar</button>")
+                self.assertEqual(res["Content-Language"], "es")
+
+    def test_other_browsers_get_english(self):
+        for header in ["en-US", "pt-BR,pt;q=0.9", "fr-FR"]:
+            with self.subTest(header=header):
+                res = self.client.get("/", headers={"accept-language": header})
+                self.assertContains(res, '<html lang="en">')
+                self.assertContains(res, ">Start session</button>")
+
+    def test_switcher_names_each_language_in_itself(self):
+        for header in ["es-MX", "en-US"]:
+            with self.subTest(header=header):
+                res = self.client.get("/", headers={"accept-language": header})
+                self.assertContains(res, ">English</button>")
+                self.assertContains(res, ">Español</button>")
+
+    def test_varies_by_language_so_caches_keep_them_apart(self):
+        res = self.client.get("/", headers={"accept-language": "es-MX"})
+        self.assertIn("Accept-Language", res["Vary"])
+
+    def test_switcher_choice_overrides_the_browser(self):
+        res = self.client.post("/i18n/setlang/", {"language": "es", "next": "/"})
+        self.assertRedirects(res, "/", fetch_redirect_response=False)
+        res = self.client.get("/", headers={"accept-language": "en-US"})
+        self.assertContains(res, ">Empezar</button>")
+
+    def test_api_errors_are_translated(self):
+        res = self.client.post(
+            "/api/recordings/",
+            {"audio": audio_file(content_type="text/plain")},
+            headers={"accept-language": "es-MX"},
+        )
+        self.assertEqual(res.json()["error"], "Tipo de audio no compatible: text/plain")
+
+    def test_javascript_messages_are_translated(self):
+        res = self.client.get("/jsi18n/", headers={"accept-language": "es-MX"})
+        self.assertContains(res, "Grabando")
+
+
 class StaleRecordingCleanupTests(TestCase):
     def test_deletes_only_old_recordings(self):
         old = Recording.objects.create(audio=b"old", content_type="audio/webm", size=3)

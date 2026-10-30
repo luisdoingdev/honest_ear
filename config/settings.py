@@ -28,6 +28,7 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.locale.LocaleMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -87,7 +88,10 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-LANGUAGE_CODE = "en-us"
+# The language comes from the browser's Accept-Language header (es-MX, es-419, es-AR... all map to "es"),
+# unless the visitor picked one with the switcher, which stores it in the django_language cookie.
+LANGUAGE_CODE = "en"
+LANGUAGES = [("en", "English"), ("es", "Español")]
 TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True

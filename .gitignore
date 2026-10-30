@@ -10,3 +10,6 @@ node_modules/
 test-results/
 playwright-report/
 e2e/tests/*-snapshots/
+
+# Compiled translations (built from the .po files)
+*.mo

@@ -13,7 +13,8 @@ services:
   web:
     <<: *app
     command: >
-      sh -c "python manage.py migrate --noinput &&
+      sh -c "python manage.py compilemessages -v 0 &&
+             python manage.py migrate --noinput &&
              python manage.py ensure_superuser &&
              exec python manage.py runserver 0.0.0.0:8000"
     ports:

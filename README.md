@@ -113,6 +113,30 @@ Don't copy the local `.env` into Render. Its hostnames (`db`, `redis`) only exis
 | `Invalid HTTP_HOST header` / 400 responses | The request came in on a domain Django doesn't know, such as a custom domain. Add it to `ALLOWED_HOSTS` as a bare host, without `https://` or `/`. |
 | No `Applying` lines at all | **Docker Command** in Settings isn't empty, so `start.sh` isn't running. |
 
+## Languages
+
+The site is in English and Spanish, aimed at Colombia (Bogotá and Medellín). Each visitor gets the language their browser asks for: `es-CO`, `es-419`, `es-MX` and any other `es-*` get Spanish, and everyone else gets English. There's no IP or geolocation lookup, because the browser language is what the person actually reads. The **English · Español** switch at the bottom of the page overrides the browser and is remembered in the `django_language` cookie. The Django admin follows the same choice.
+
+Translations live in `core/locale/es/LC_MESSAGES/`:
+
+| File | Strings from |
+| --- | --- |
+| `django.po` | Templates (`{% translate %}`) and Python (`gettext`), including API error messages |
+| `djangojs.po` | `record.js` (`gettext()`, served by `/jsi18n/`) |
+
+The Spanish is neutral Latin American with the informal "tú", which works for Bogotá and Medellín. "Start session" is translated as "Empezar", because "Iniciar sesión" reads as "Log in".
+
+After adding or changing text, update the `.po` files, fill in the new `msgstr` entries, then restart:
+
+```bash
+docker compose exec web sh -c "cd core && django-admin makemessages -l es && django-admin makemessages -d djangojs -l es"
+docker compose restart web
+```
+
+The compiled `.mo` files aren't committed. Compose compiles them when `web` starts, and the Dockerfile compiles them at build time for Render. Remove any `#, fuzzy` marks after checking a translation, because fuzzy entries are skipped.
+
+To add another language, add it to `LANGUAGES` in `config/settings.py`, run the commands above with `-l <code>`, and translate the new files.
+
 ## Feature flags
 
 Flags live in the admin under **Core → Feature flags**. Tick or untick **Enabled** in the list and click **Save**. Changes take effect on the next request and are logged (`Feature flag recording turned off by admin`).

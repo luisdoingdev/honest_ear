@@ -1,5 +1,5 @@
-{% load static %}<!doctype html>
-<html lang="en">
+{% load static i18n %}{% get_current_language as LANGUAGE_CODE %}<!doctype html>
+<html lang="{{ LANGUAGE_CODE }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,23 +9,35 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{% static 'core/landing.css' %}">
-  {% if recording_enabled %}<script src="{% static 'core/record.js' %}" defer></script>{% endif %}
+  {% if recording_enabled %}
+    <script src="{% url 'javascript-catalog' %}" defer></script>
+    <script src="{% static 'core/record.js' %}" defer></script>
+  {% endif %}
 </head>
 <body>
   <main class="recorder">
     <h1 class="recorder-title">Honest Ear</h1>
     {% if recording_enabled %}
-      <p id="status" class="status" role="status" aria-live="polite">Start a session to record your voice.</p>
+      <p id="status" class="status" role="status" aria-live="polite">{% translate "Start a session to record your voice." %}</p>
       <p id="timer" class="timer" hidden>0:00</p>
       <div class="controls">
-        <button id="start" class="btn" type="button">Start session</button>
-        <button id="record" class="btn" type="button" hidden>Record</button>
-        <button id="stop" class="btn btn-stop" type="button" hidden>Stop</button>
-        <button id="play" class="btn" type="button" hidden>Play</button>
+        <button id="start" class="btn" type="button">{% translate "Start session" %}</button>
+        <button id="record" class="btn" type="button" hidden>{% translate "Record" %}</button>
+        <button id="stop" class="btn btn-stop" type="button" hidden>{% translate "Stop" %}</button>
+        <button id="play" class="btn" type="button" hidden>{% translate "Play" %}</button>
       </div>
     {% else %}
-      <p class="status" role="status">Recording is unavailable right now. Please check back soon.</p>
+      <p class="status" role="status">{% translate "Recording is unavailable right now. Please check back soon." %}</p>
     {% endif %}
   </main>
+  <form class="language" action="{% url 'set_language' %}" method="post" aria-label="{% translate 'Language' %}">
+    {% csrf_token %}
+    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+    {% get_available_languages as available %}
+    {% get_language_info_list for available as languages %}
+    {% for language in languages %}
+      <button type="submit" name="language" value="{{ language.code }}" lang="{{ language.code }}"{% if language.code == LANGUAGE_CODE %} aria-current="true"{% endif %}>{{ language.name_local|capfirst }}</button>
+    {% endfor %}
+  </form>
 </body>
 </html>
