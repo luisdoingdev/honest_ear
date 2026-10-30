@@ -80,14 +80,14 @@ def health(request):
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
         status["database"] = "ok"
-    except Exception as exc:
+    except Exception:
         logger.exception("Health check: database unavailable")
-        status["database"] = f"error: {exc}"
+        status["database"] = "error"
     try:
         cache.set("health", "ok", 5)
         status["redis"] = cache.get("health")
-    except Exception as exc:
+    except Exception:
         logger.exception("Health check: redis unavailable")
-        status["redis"] = f"error: {exc}"
+        status["redis"] = "error"
     healthy = all(v == "ok" for v in status.values())
     return JsonResponse(status, status=200 if healthy else 503)

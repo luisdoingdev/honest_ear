@@ -1,0 +1,29 @@
+# Render Blueprint: declares the web service and the names of its environment variables.
+# Secret values never go in this file: `generateValue` lets Render create one, and `sync: false`
+# makes Render ask for the value in its dashboard when the Blueprint is first applied.
+services:
+  - type: web
+    name: honest-ear-test
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    # `/health/` also checks Redis and returns 503 without it; switch once REDIS_URL is real.
+    healthCheckPath: /
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: DJANGO_SUPERUSER_USERNAME
+        value: admin
+      - key: DJANGO_SUPERUSER_EMAIL
+        sync: false
+      - key: DJANGO_SUPERUSER_PASSWORD
+        sync: false
+      - key: DEBUG
+        value: "False"
+      - key: LOG_LEVEL
+        value: INFO

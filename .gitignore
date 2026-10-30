@@ -4,3 +4,9 @@ __pycache__/
 staticfiles/
 .venv/
 celerybeat-schedule*
+
+# Playwright generated files
+node_modules/
+test-results/
+playwright-report/
+e2e/tests/*-snapshots/
