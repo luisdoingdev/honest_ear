@@ -5,7 +5,8 @@ staticfiles/
 .venv/
 celerybeat-schedule*
 
-# Playwight Gens
+# Playwright generated files
 node_modules/
 test-results/
 playwright-report/
+e2e/tests/*-snapshots/

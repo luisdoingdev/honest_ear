@@ -12,6 +12,8 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: [["list"], ["html", { open: "never" }]],
+  // Screenshot baselines are not committed: a missing one is written on first run, then compared against.
+  updateSnapshots: "missing",
   use: {
     baseURL: process.env.BASE_URL ?? "http://localhost:8000",
     trace: "retain-on-failure",
