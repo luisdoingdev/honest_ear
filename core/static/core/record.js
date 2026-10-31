@@ -10,6 +10,8 @@
   const els = {
     status: $("status"),
     transcript: $("transcript"),
+    phonemes: $("phonemes"),
+    phonemesText: $("phonemes-text"),
     captions: $("captions"),
     spinner: $("spinner"),
     play: $("play"),
@@ -60,6 +62,12 @@
   }
 
   // transcript is null when transcription is off or failed (then error explains why).
+  // null when the scorer is off, cold or down: the line stays hidden.
+  function showPhonemes(phonemes) {
+    els.phonemesText.textContent = phonemes || "";
+    els.phonemes.hidden = !phonemes;
+  }
+
   function showTranscript(transcript, error) {
     els.transcript.replaceChildren();
     els.transcript.classList.toggle("transcript-empty", !transcript);
@@ -184,6 +192,7 @@
     recorder.start();
 
     els.transcript.hidden = true;
+    els.phonemes.hidden = true;
     showCaptions([]);
     setPhase("listening");
     startClock();
@@ -208,7 +217,7 @@
     const type = recorder.mimeType || chunks[0]?.type || "audio/webm";
     const form = new FormData();
     form.append("audio", new Blob(chunks, { type }), "recording");
-    if (liveText !== null) form.append("live_transcript", "1");
+    if (liveText !== null) form.append("live_transcript", liveText);
 
     try {
       const created = await fetch("/api/recordings/", {
@@ -227,6 +236,7 @@
 
       if (liveText !== null) showTranscript(liveText);
       else showTranscript(recording.transcript ?? null, recording.transcript_error);
+      showPhonemes(recording.phonemes ?? null);
       setStatus(gettext("Tap Play to hear it. It's deleted when it finishes."));
       setPhase("revealed");
     } catch (err) {

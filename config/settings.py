@@ -73,6 +73,12 @@ DEEPGRAM_MODEL = env("DEEPGRAM_MODEL", default="nova-3")
 # Live captions use Flux, Deepgram's turn-based model; "multi" covers Spanish and English.
 DEEPGRAM_STREAMING_MODEL = env("DEEPGRAM_STREAMING_MODEL", default="flux-general-multi")
 
+# Phoneme service on Modal (scorer/scorer.py). Empty URL or secret: phonemes are skipped.
+SCORER_URL = env("SCORER_URL", default="")
+SCORER_SECRET = env("SCORER_SECRET", default="")
+# Short, because the upload waits for it; a cold Modal container takes longer and is logged as a miss.
+SCORER_TIMEOUT_SECONDS = env.float("SCORER_TIMEOUT_SECONDS", default=10)
+
 CELERY_BROKER_URL = env("CELERY_BROKER_URL", default=REDIS_URL)
 CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default=REDIS_URL)
 CELERY_TASK_SERIALIZER = "json"
@@ -102,6 +108,10 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Uploaded eval clips (EvalClip). Served by Django only with DEBUG on: the bench is for local use.
+MEDIA_URL = "media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},

@@ -7,9 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# gettext provides the tools behind makemessages and compilemessages.
+# gettext: makemessages and compilemessages. espeak-ng: expected phonemes for the eval bench (EvalClip).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gettext \
+    && apt-get install -y --no-install-recommends gettext espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

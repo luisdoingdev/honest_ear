@@ -28,6 +28,10 @@
 
     {% if recording_enabled %}
       <blockquote id="transcript" class="transcript" hidden></blockquote>
+      <p id="phonemes" class="phonemes" hidden>
+        <span class="phonemes-label">{% translate "Phonemes" %}</span>
+        <span id="phonemes-text" class="phonemes-text" lang="und-fonipa"></span>
+      </p>
 
       <div class="session-lower">
         <p id="captions" class="captions" aria-live="off" hidden></p>

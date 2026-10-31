@@ -1,0 +1,7 @@
+# CPU-only PyTorch: the CUDA build is several GB this container would never use.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.8
+transformers>=4.57
+numpy>=2
+fastapi>=0.115
+uvicorn>=0.32

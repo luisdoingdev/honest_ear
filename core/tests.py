@@ -1,3 +1,5 @@
+import shutil
+import tempfile
 from datetime import timedelta
 from unittest import mock
 from urllib.parse import parse_qs, urlparse
@@ -6,17 +8,18 @@ import httpx
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import Client, TestCase, override_settings
+from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
-from .models import FeatureFlag, Recording
+from . import evaluation, scoring, transcription
+from .models import Attempt, EvalClip, FeatureFlag, Recording
 from .tasks import delete_stale_recordings
 from .transcription import DEEPGRAM_URL
 from .views import MAX_RECORDING_BYTES
 
 
-# A real DEEPGRAM_API_KEY in .env must never make tests call (and bill) Deepgram.
-@override_settings(DEEPGRAM_API_KEY="")
+# Real keys in .env must never make tests call (and bill) Deepgram or the Modal scorer.
+@override_settings(DEEPGRAM_API_KEY="", SCORER_URL="")
 class OfflineTestCase(TestCase):
     pass
 
@@ -145,7 +148,7 @@ def deepgram_reply(transcript="", status=200, body=None):
     return httpx.Response(status, json=body, request=httpx.Request("POST", DEEPGRAM_URL))
 
 
-@override_settings(DEEPGRAM_API_KEY="test-key")
+@override_settings(DEEPGRAM_API_KEY="test-key", SCORER_URL="")
 @mock.patch("core.transcription.httpx.post")
 class TranscriptionTests(TestCase):
     def upload(self, language="es-CO"):
@@ -228,6 +231,7 @@ def grant_reply(status=200, body=None):
 
 @override_settings(
     DEEPGRAM_API_KEY="test-key",
+    SCORER_URL="",
     CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
 )
 @mock.patch("core.transcription.httpx.post")
@@ -319,11 +323,148 @@ class LiveCaptionTests(TestCase):
 
     def test_upload_with_a_live_transcript_skips_deepgram(self, post):
         with self.assertLogs("core.views", level="INFO") as logs:
-            res = self.client.post("/api/recordings/", {"audio": audio_file(), "live_transcript": "1"})
+            res = self.client.post("/api/recordings/", {"audio": audio_file(), "live_transcript": "Hola"})
         self.assertEqual(res.status_code, 201)
         self.assertNotIn("transcript", res.json())
         self.assertIn("already transcribed live", logs.output[-1])
+        self.assertEqual(Attempt.objects.get().transcript, "Hola")
         post.assert_not_called()
+
+
+def scorer_reply(status=200, body=None):
+    body = body if body is not None else {"phonemes": "o l a k o m o", "inference_ms": 41.5, "duration_s": 2.48}
+    return httpx.Response(status, json=body, request=httpx.Request("POST", "https://scorer.example/phonemes"))
+
+
+@override_settings(SCORER_URL="https://scorer.example/phonemes", SCORER_SECRET="scorer-secret", SCORER_TIMEOUT_SECONDS=7)
+@mock.patch("core.scoring.httpx.post")
+class ScorerClientTests(SimpleTestCase):
+    def test_sends_the_raw_clip_with_the_shared_secret_and_parses_the_reply(self, post):
+        post.return_value = scorer_reply()
+        result = scoring.phonemes_for(b"webm-bytes", "audio/webm")
+
+        self.assertEqual(result, {"phonemes": "o l a k o m o", "inference_ms": 41.5, "duration_s": 2.48})
+        self.assertEqual(post.call_args.args, ("https://scorer.example/phonemes",))
+        self.assertEqual(post.call_args.kwargs["content"], b"webm-bytes")
+        self.assertEqual(
+            post.call_args.kwargs["headers"], {"Content-Type": "audio/webm", "X-Scorer-Secret": "scorer-secret"}
+        )
+        self.assertEqual(post.call_args.kwargs["timeout"], 7)
+
+    def test_failures_become_scorer_errors_without_the_secret(self, post):
+        cases = [
+            (httpx.ReadTimeout("slow"), "timed out after 7s (cold start?)"),
+            (httpx.ConnectError("refused"), "Scorer request failed: ConnectError"),
+            (scorer_reply(status=401, body={"error": "invalid or missing secret"}), "rejected the secret (HTTP 401)"),
+            (scorer_reply(status=500, body={}), "Scorer returned HTTP 500"),
+            (scorer_reply(body={"error": "?"}), "Scorer response had no phonemes"),
+        ]
+        for outcome, message in cases:
+            with self.subTest(message=message):
+                post.reset_mock(side_effect=True, return_value=True)
+                if isinstance(outcome, Exception):
+                    post.side_effect = outcome
+                else:
+                    post.return_value = outcome
+                with self.assertRaises(scoring.ScorerError) as raised:
+                    scoring.phonemes_for(b"x", "audio/webm")
+                self.assertIn(message, str(raised.exception))
+                self.assertNotIn("scorer-secret", str(raised.exception))
+
+    @override_settings(SCORER_URL="")
+    def test_not_configured_without_a_url(self, post):
+        self.assertFalse(scoring.is_configured())
+
+
+@override_settings(DEEPGRAM_API_KEY="test-key", SCORER_URL="https://scorer.example/phonemes", SCORER_SECRET="s")
+class AttemptTests(TestCase):
+    """One clip in: Deepgram's transcript and Modal's phonemes saved side by side."""
+
+    def setUp(self):
+        for target, name in [("core.scoring.phonemes_for", "scorer"), ("core.transcription.transcribe", "deepgram")]:
+            patcher = mock.patch(target)
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+        self.scorer.return_value = {"phonemes": "o l a k o m o", "inference_ms": 41.5, "duration_s": 2.48}
+        self.deepgram.return_value = "Hola, ¿cómo estás?"
+
+    def upload(self, **fields):
+        return self.client.post("/api/recordings/", {"audio": audio_file(), **fields})
+
+    def test_saves_the_deepgram_transcript_next_to_the_phonemes(self):
+        data = self.upload().json()
+
+        attempt = Attempt.objects.get(pk=data["attempt_id"])
+        self.assertEqual(attempt.transcript, "Hola, ¿cómo estás?")
+        self.assertEqual(attempt.transcript_source, Attempt.TranscriptSource.DEEPGRAM)
+        self.assertEqual(attempt.phonemes, "o l a k o m o")
+        self.assertEqual((attempt.phoneme_inference_ms, attempt.audio_duration_s), (41.5, 2.48))
+        self.assertEqual((attempt.scorer_error, attempt.transcript_error), ("", ""))
+        self.assertEqual(data["phonemes"], "o l a k o m o")
+        self.assertEqual(data["transcript"], "Hola, ¿cómo estás?")
+        # The very same bytes went to both services.
+        self.assertEqual(self.scorer.call_args.args, (b"\x01" * 1024, "audio/webm"))
+        self.assertEqual(self.deepgram.call_args.args, (b"\x01" * 1024, "audio/webm"))
+
+    def test_live_caption_text_is_kept_and_deepgram_is_not_paid_again(self):
+        data = self.upload(live_transcript="Hola desde Medellín").json()
+
+        attempt = Attempt.objects.get(pk=data["attempt_id"])
+        self.assertEqual(attempt.transcript, "Hola desde Medellín")
+        self.assertEqual(attempt.transcript_source, Attempt.TranscriptSource.LIVE)
+        self.assertEqual(attempt.phonemes, "o l a k o m o")
+        self.deepgram.assert_not_called()
+
+    def test_live_text_is_capped(self):
+        self.upload(live_transcript="a" * 20_000)
+        self.assertEqual(len(Attempt.objects.get().transcript), 10_000)
+
+    def test_a_cold_or_down_scorer_never_fails_the_upload(self):
+        self.scorer.side_effect = scoring.ScorerError("Scorer timed out after 10s (cold start?)")
+        with self.assertLogs("core.views", level="WARNING") as logs:
+            res = self.upload()
+
+        self.assertEqual(res.status_code, 201)
+        self.assertIsNone(res.json()["phonemes"])
+        attempt = Attempt.objects.get()
+        self.assertIsNone(attempt.phonemes)
+        self.assertEqual(attempt.scorer_error, "Scorer timed out after 10s (cold start?)")
+        self.assertEqual(attempt.transcript, "Hola, ¿cómo estás?", "the transcript is still saved")
+        self.assertIn("not scored: Scorer timed out", logs.output[0])
+
+    def test_deepgram_failing_still_saves_the_phonemes(self):
+        self.deepgram.side_effect = transcription.TranscriptionError("Deepgram returned HTTP 502")
+        with self.assertLogs("core.views", level="WARNING"):
+            self.upload()
+        attempt = Attempt.objects.get()
+        self.assertEqual(attempt.phonemes, "o l a k o m o")
+        self.assertIsNone(attempt.transcript)
+        self.assertEqual(attempt.transcript_source, Attempt.TranscriptSource.NONE)
+        self.assertEqual(attempt.transcript_error, "Deepgram returned HTTP 502")
+
+    @override_settings(SCORER_URL="")
+    def test_scorer_not_configured_skips_it(self):
+        self.upload()
+        self.scorer.assert_not_called()
+        self.assertIsNone(Attempt.objects.get().phonemes)
+        self.assertEqual(Attempt.objects.get().scorer_error, "")
+
+    def test_the_words_outlive_the_audio(self):
+        data = self.upload().json()
+        self.client.delete(f"/api/recordings/{data['id']}/")
+
+        self.assertFalse(Recording.objects.exists())
+        attempt = Attempt.objects.get(pk=data["attempt_id"])
+        self.assertIsNone(attempt.recording)
+        self.assertEqual(attempt.phonemes, "o l a k o m o")
+
+    def test_phonemes_and_words_are_never_logged(self):
+        with self.assertLogs("core.views", level="INFO") as logs:
+            self.upload()
+        joined = "\n".join(logs.output)
+        self.assertIn("phonemes (13 characters, 42 ms inference, 2.48 s audio)", joined)
+        self.assertNotIn("o l a k o m o", joined)
+        self.assertNotIn("Hola", joined)
 
 
 class StaleRecordingCleanupTests(OfflineTestCase):
@@ -387,3 +528,134 @@ class RecordingFeatureFlagTests(OfflineTestCase):
         self.assertFalse(FeatureFlag.is_enabled("recording"))
         self.assertEqual(logs.output, ["WARNING:core.admin:Feature flag recording turned off by boss"])
         self.assertNotContains(self.client.get("/"), "Start session")
+
+
+class EvalScoreTests(SimpleTestCase):
+    def test_identical_and_empty(self):
+        self.assertEqual(evaluation.phoneme_score("o l a", "o l a"), 100.0)
+        self.assertEqual(evaluation.phoneme_score("o l a", ""), 0.0)
+        self.assertIsNone(evaluation.phoneme_score("", "o l a"), "nothing expected: no score")
+
+    def test_phonemes_are_compared_as_tokens_not_characters(self):
+        # One substituted phoneme out of four (tʃ is a single phoneme): 75.
+        self.assertEqual(evaluation.phoneme_score("tʃ e k s", "ʃ e k s"), 75.0)
+
+    def test_extra_noise_cannot_push_the_score_below_zero(self):
+        self.assertEqual(evaluation.phoneme_score("o", "a b c d e"), 0.0)
+
+    def test_word_score_ignores_case_and_punctuation_but_not_accents(self):
+        self.assertEqual(evaluation.word_score("¡Hola, cómo estás!", "hola cómo estás"), 100.0)
+        self.assertEqual(evaluation.word_score("hola cómo estás", "hola como estás"), 66.7)
+
+    def test_word_score_counts_missing_and_extra_words(self):
+        self.assertEqual(evaluation.word_score("the channels on this list", "the channels on list"), 80.0)
+        self.assertEqual(evaluation.word_score("to check", "to check the mix"), 0.0)
+
+
+class ExpectedPhonemesTests(SimpleTestCase):
+    """Real espeak-ng (installed in the image), in the same format the model answers in."""
+
+    def test_spanish_and_english(self):
+        self.assertEqual(evaluation.expected_phonemes("Hola, ¿cómo estás?", "es"), "o l a k o m o e s t a s")
+        self.assertEqual(evaluation.expected_phonemes("check the mix", "en"), "tʃ ɛ k ð ə m ɪ k s")
+
+
+EVAL_AUDIO = b"RIFF fake wav bytes"
+
+
+@override_settings(DEEPGRAM_API_KEY="test-key", SCORER_URL="https://scorer.example/", SCORER_SECRET="s")
+class EvalBenchTests(TestCase):
+    """The admin is the bench: upload and label a clip, select it, Run eval, read the scores in the list."""
+
+    def setUp(self):
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        override = override_settings(MEDIA_ROOT=media)
+        override.enable()
+        self.addCleanup(override.disable)
+        admin_user = get_user_model().objects.create_superuser("bench", "bench@example.com", "pw-123456")
+        self.client.force_login(admin_user)
+        for target, name in [("core.scoring.phonemes_for", "scorer"), ("core.transcription.transcribe", "deepgram")]:
+            patcher = mock.patch(target)
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+
+    def add_clip(self, text, label, language="es"):
+        res = self.client.post(
+            "/admin/core/evalclip/add/",
+            {
+                "audio": SimpleUploadedFile("clip.wav", EVAL_AUDIO, content_type="audio/wav"),
+                "intended_text": text,
+                "language": language,
+                "label": label,
+            },
+        )
+        self.assertEqual(res.status_code, 302, res.content[:500])
+        return EvalClip.objects.order_by("-pk").first()
+
+    def run_eval(self, *clips):
+        return self.client.post(
+            "/admin/core/evalclip/",
+            {"action": "run_eval", "_selected_action": [c.pk for c in clips]},
+            follow=True,
+        )
+
+    def test_upload_label_run_eval_and_read_the_scores(self):
+        good = self.add_clip("Hola, ¿cómo estás?", "good")
+        off = self.add_clip("Hola, ¿cómo estás?", "off")
+        self.assertIsNone(good.phoneme_score, "empty until Run eval")
+        # Run eval goes through the selection newest first: the "off" clip, then the "good" one.
+        self.scorer.side_effect = [
+            {"phonemes": "o a k o m e s", "inference_ms": 1, "duration_s": 1},
+            {"phonemes": "o l a k o m o e s t a s", "inference_ms": 1, "duration_s": 1},
+        ]
+        self.deepgram.side_effect = ["hola", "Hola, cómo estás"]
+
+        res = self.run_eval(good, off)
+
+        self.assertContains(res, "Evaluated 2 clip(s).")
+        good.refresh_from_db(), off.refresh_from_db()
+        self.assertEqual((good.phoneme_score, good.word_score), (100.0, 100.0))
+        self.assertLess(off.phoneme_score, 70)
+        self.assertEqual(off.word_score, 33.3)
+        self.assertEqual(good.expected_phonemes, "o l a k o m o e s t a s")
+        self.assertEqual(good.heard_transcript, "Hola, cómo estás")
+        self.assertIsNotNone(good.evaluated_at)
+        # The real pipeline got the uploaded file's bytes, with a content type Deepgram understands.
+        self.assertEqual(self.deepgram.call_args_list[1].args, (EVAL_AUDIO, "audio/wav"))
+        self.assertEqual(self.scorer.call_args_list[1].args, (EVAL_AUDIO, "audio/wav"))
+
+    def test_list_shows_scores_and_label_and_filters_by_label(self):
+        good = self.add_clip("uno dos", "good")
+        self.add_clip("tres cuatro", "off")
+        EvalClip.objects.filter(pk=good.pk).update(phoneme_score=91.5, word_score=100.0)
+
+        page = self.client.get("/admin/core/evalclip/")
+        self.assertContains(page, "Phoneme score")
+        self.assertContains(page, "Word score")
+        self.assertContains(page, "91.5")
+        off_only = self.client.get("/admin/core/evalclip/?label__exact=off")
+        self.assertContains(off_only, "tres cuatro")
+        self.assertNotContains(off_only, "uno dos")
+
+    def test_a_down_scorer_keeps_the_word_score_and_records_why(self):
+        clip = self.add_clip("uno dos", "okay")
+        self.scorer.side_effect = scoring.ScorerError("Scorer timed out after 10s (cold start?)")
+        self.deepgram.return_value = "uno dos"
+
+        res = self.run_eval(clip)
+
+        self.assertContains(res, "1 had errors")
+        clip.refresh_from_db()
+        self.assertIsNone(clip.phoneme_score)
+        self.assertEqual(clip.word_score, 100.0)
+        self.assertIn("Scorer timed out", clip.eval_error)
+
+    def test_only_audio_files_are_accepted(self):
+        res = self.client.post(
+            "/admin/core/evalclip/add/",
+            {"audio": SimpleUploadedFile("notes.txt", b"hi"), "intended_text": "x", "language": "es", "label": "good"},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(EvalClip.objects.exists())
+

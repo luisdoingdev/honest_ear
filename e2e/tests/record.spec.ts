@@ -2,6 +2,7 @@ import { test, expect, Page } from "@playwright/test";
 import { overflow, plainVhRules, watchForErrors } from "./helpers";
 
 const TOKEN_PATH = "/api/transcription/token/";
+const PHONEMES = "o l a e s t o i p ɾ o β a n d o";
 
 /**
  * Whether the page tries live captions comes from the server (Deepgram key and flags), which differs
@@ -131,6 +132,11 @@ test.describe("home page recorder", () => {
       ],
       { turn: 1, event: "EndOfTurn", text: "and a little English." },
     );
+    // The scorer was off or cold: no phonemes, so their line stays hidden.
+    await page.route("**/api/recordings/", async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...(await response.json()), phonemes: null } });
+    });
     await page.goto("/");
 
     await page.getByRole("button", { name: "Start session" }).click();
@@ -149,6 +155,7 @@ test.describe("home page recorder", () => {
 
     await expect(page.locator("#transcript")).toHaveText("Hola, ¿cómo estás? and a little English.");
     await expect(captions).toBeHidden();
+    await expect(page.locator("#phonemes")).toBeHidden();
     // 80 ms of 16 kHz, 16-bit mono PCM per message: what the server told Flux to expect.
     expect(chunkSizes.length).toBeGreaterThanOrEqual(28);
     expect(new Set(chunkSizes)).toEqual(new Set([2560]));
@@ -171,7 +178,7 @@ test.describe("home page recorder", () => {
     // Server-side Deepgram can't be faked from here, so stand in its result on the real upload response.
     await page.route("**/api/recordings/", async (route) => {
       const response = await route.fetch();
-      await route.fulfill({ response, json: { ...(await response.json()), transcript: words } });
+      await route.fulfill({ response, json: { ...(await response.json()), transcript: words, phonemes: PHONEMES } });
     });
     await page.goto("/");
 
@@ -182,6 +189,9 @@ test.describe("home page recorder", () => {
     expect((await uploadDone).postDataBuffer()?.toString("latin1")).not.toContain('name="live_transcript"');
 
     await expect(page.locator("#transcript")).toHaveText(words);
+    // What the Modal scorer heard, under the words.
+    await expect(page.locator("#phonemes")).toBeVisible();
+    await expect(page.locator("#phonemes-text")).toHaveText(PHONEMES);
     const { sideways } = await overflow(page);
     expect(sideways, "page is wider than the screen").toBeLessThanOrEqual(0);
 

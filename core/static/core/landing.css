@@ -102,6 +102,31 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* What the scorer heard, in IPA, under the words. */
+.phonemes {
+  box-sizing: border-box;
+  width: min(100%, 32rem);
+  max-height: 20svh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0 16px 0 19px;
+  text-align: left;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.phonemes-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.phonemes-text {
+  font: 15px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
 .transcript-empty {
   border-left-color: var(--border);
   color: var(--muted);

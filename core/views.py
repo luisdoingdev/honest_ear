@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from django.core.cache import cache
 from django.db import connection
@@ -8,8 +9,8 @@ from django.urls import reverse
 from django.utils.translation import gettext as _
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from . import transcription
-from .models import FeatureFlag, Recording
+from . import scoring, transcription
+from .models import Attempt, FeatureFlag, Recording
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,8 @@ TRANSCRIPTION_FLAG = "transcription"
 LIVE_CAPTIONS_FLAG = "live_captions"
 MAX_RECORDING_BYTES = 5 * 1024 * 1024
 ALLOWED_AUDIO_TYPES = {"audio/webm", "audio/mp4", "audio/ogg"}
+# Live captions' text comes from the page; anything longer than a 60-second clip could hold is cut.
+MAX_LIVE_TRANSCRIPT_CHARS = 10_000
 # Each token opens a paid Deepgram stream, so anyone hammering the endpoint is cut off per IP.
 LIVE_TOKENS_PER_MINUTE = 10
 
@@ -107,34 +110,92 @@ def create_recording(request):
         audio=upload.read(), content_type=content_type, size=upload.size
     )
     logger.info("Recording %s created (%d bytes, %s)", recording.id, recording.size, content_type)
-    # The page already has the words from live captions, so a second Deepgram call would only cost twice.
-    if request.POST.get("live_transcript") == "1":
+    # The page sends the words it already got from live captions; then Deepgram isn't paid a second time.
+    live_text = request.POST.get("live_transcript")
+    if live_text is not None:
+        live_text = live_text[:MAX_LIVE_TRANSCRIPT_CHARS]
         logger.info("Recording %s already transcribed live", recording.id)
-        extra = {}
-    else:
-        extra = transcribe_recording(recording)
+
+    attempt, extra = analyze_recording(recording, live_text)
     return JsonResponse(
-        {"id": str(recording.id), "audio_url": reverse("recording-audio", args=[recording.id]), **extra},
+        {
+            "id": str(recording.id),
+            "audio_url": reverse("recording-audio", args=[recording.id]),
+            "attempt_id": str(attempt.id),
+            **extra,
+        },
         status=201,
     )
 
 
-def transcribe_recording(recording):
-    """`transcript` is None when transcription is off or failed; the recording is still usable either way."""
-    if not transcription_enabled():
-        return {"transcript": None}
+def analyze_recording(recording, live_text):
+    """Phonemes from the Modal scorer and the transcript for the same clip, saved together as an Attempt.
 
+    Both services are called at the same time, so the upload waits for the slower one rather than the sum.
+    Failures are logged and stored on the attempt; they never fail the upload.
+    """
+    audio = bytes(recording.audio)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        scored = pool.submit(score_recording, recording.id, audio, recording.content_type)
+        if live_text is None:
+            text, transcript_error = transcribe_recording(recording.id, audio, recording.content_type)
+            source = Attempt.TranscriptSource.DEEPGRAM if text is not None else Attempt.TranscriptSource.NONE
+        else:
+            text, transcript_error, source = live_text, "", Attempt.TranscriptSource.LIVE
+        phonemes, scorer_error = scored.result()
+
+    attempt = Attempt.objects.create(
+        recording=recording,
+        transcript=text,
+        transcript_source=source,
+        transcript_error=transcript_error[:300],
+        phonemes=phonemes["phonemes"] if phonemes else None,
+        phoneme_inference_ms=phonemes["inference_ms"] if phonemes else None,
+        audio_duration_s=phonemes["duration_s"] if phonemes else None,
+        scorer_error=scorer_error[:300],
+    )
+
+    extra = {"phonemes": attempt.phonemes}
+    if live_text is None:
+        extra["transcript"] = text
+        if transcript_error:
+            extra["transcript_error"] = _("Couldn't transcribe this recording.")
+    return attempt, extra
+
+
+def transcribe_recording(recording_id, audio, content_type):
+    """Returns (text, error). text is None when transcription is off or failed."""
+    if not transcription_enabled():
+        return None, ""
     try:
-        text = transcription.transcribe(bytes(recording.audio), recording.content_type)
+        text = transcription.transcribe(audio, content_type)
     except transcription.TranscriptionError as exc:
-        logger.warning("Recording %s not transcribed: %s", recording.id, exc)
-        return {"transcript": None, "transcript_error": _("Couldn't transcribe this recording.")}
+        logger.warning("Recording %s not transcribed: %s", recording_id, exc)
+        return None, str(exc)
 
     # Only the length is logged: the words themselves are the visitor's private speech.
+    logger.info("Recording %s transcribed (%s, %d characters)", recording_id, transcription.LANGUAGE, len(text))
+    return text, ""
+
+
+def score_recording(recording_id, audio, content_type):
+    """Returns (result, error). result is None when the scorer is off, cold or down."""
+    if not scoring.is_configured():
+        return None, ""
+    try:
+        result = scoring.phonemes_for(audio, content_type)
+    except scoring.ScorerError as exc:
+        logger.warning("Recording %s not scored: %s", recording_id, exc)
+        return None, str(exc)
+
     logger.info(
-        "Recording %s transcribed (%s, %d characters)", recording.id, transcription.LANGUAGE, len(text)
+        "Recording %s phonemes (%d characters, %.0f ms inference, %.2f s audio)",
+        recording_id,
+        len(result["phonemes"]),
+        result["inference_ms"],
+        result["duration_s"],
     )
-    return {"transcript": text}
+    return result, ""
 
 
 @require_GET
