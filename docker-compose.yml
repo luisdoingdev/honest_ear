@@ -9,21 +9,33 @@ x-app: &app
     redis:
       condition: service_healthy
 
+x-web: &web
+  <<: *app
+  command: >
+    sh -c "python manage.py compilemessages -v 0 &&
+           python manage.py migrate --noinput &&
+           python manage.py ensure_superuser &&
+           exec python manage.py runserver 0.0.0.0:8000"
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/')"]
+    interval: 5s
+    timeout: 5s
+    retries: 20
+
 services:
   web:
-    <<: *app
-    command: >
-      sh -c "python manage.py compilemessages -v 0 &&
-             python manage.py migrate --noinput &&
-             python manage.py ensure_superuser &&
-             exec python manage.py runserver 0.0.0.0:8000"
+    <<: *web
     ports:
       - "8000:8000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/')"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
+
+  # The e2e tests' server: the same app, without Whisper and the scorer, so a recording's results come back
+  # at once (as nulls). Tests that need real-looking results fake the socket in the browser instead.
+  web-e2e:
+    <<: *web
+    profiles: ["test"]
+    environment:
+      TRANSCRIBER_URL: ""
+      SCORER_URL: ""
 
   e2e:
     image: mcr.microsoft.com/playwright:v1.64.1-noble
@@ -34,14 +46,14 @@ services:
     environment:
       BASE_URL: http://localhost:8000
       CI: ${CI:-}
-    # Share web's network so tests use localhost: browsers only allow the microphone on HTTPS or localhost.
-    network_mode: "service:web"
+    # Share web-e2e's network so tests use localhost: browsers only allow the microphone on HTTPS or localhost.
+    network_mode: "service:web-e2e"
     ipc: host
     volumes:
       - ./e2e:/e2e
       - e2e_node_modules:/e2e/node_modules
     depends_on:
-      web:
+      web-e2e:
         condition: service_healthy
 
   celery:
@@ -82,11 +94,10 @@ services:
       timeout: 5s
       retries: 10
 
-  # Local CPU phoneme service (scorer/local.py), the same contract as the Modal one.
-  # Opt-in: docker compose --profile scorer up -d scorer. Django reaches it at http://scorer:8000/.
+  # Phoneme service (scorer/local.py): wav2vec2 on CPU, the same contract as the Modal one.
+  # Django reaches it at http://scorer:8000/.
   scorer:
     build: ./scorer
-    profiles: ["scorer"]
     environment:
       # The same shared secret as Django's SCORER_SECRET, read from .env.
       SCORER_SECRET: ${SCORER_SECRET:-}
@@ -106,8 +117,29 @@ services:
       # First start downloads ~1.2 GB of weights; later starts only load them.
       start_period: 600s
 
+  # Speech-to-text (scorer/transcriber.py): Whisper on CPU. Django reaches it at http://transcriber:8000/.
+  transcriber:
+    build:
+      context: ./scorer
+      dockerfile: Dockerfile.transcriber
+    environment:
+      SCORER_SECRET: ${SCORER_SECRET:-}
+      TRANSCRIBER_MODEL: ${TRANSCRIBER_MODEL:-medium}
+    volumes:
+      - transcriber_hf_cache:/cache
+    ports:
+      - "${TRANSCRIBER_PORT:-8012}:8000"
+    mem_limit: 2500m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 600s
+
 volumes:
   postgres_data:
   redis_data:
   e2e_node_modules:
   scorer_hf_cache:
+  transcriber_hf_cache:

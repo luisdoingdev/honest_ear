@@ -8,6 +8,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+
 from . import pronunciation, scoring, transcription
 from .models import EvalResult, EvalRun
 
@@ -27,7 +28,7 @@ LABEL_RANK = {"good": 0, "okay": 1, "off": 2}
 
 def run_bench(clips, config=None):
     """Evaluates every clip and saves the run with its config snapshot and summary. Never raises per clip."""
-    config = config or pronunciation.load_config()
+    config = {**(config or pronunciation.load_config()), "transcriber": transcriber_identity()}
     run = EvalRun.objects.create(config_version=str(config["version"]), config=config)
     results = [evaluate_clip(run, clip, config) for clip in clips]
     run.summary = summarize(results)
@@ -94,13 +95,18 @@ def _save(result, **fields):
     return result
 
 
+def transcriber_identity():
+    """Recorded in each run: a different transcriber passes or gates different clips, so runs say which."""
+    return f"local: {transcription.model_name()}"
+
+
 def _transcript(audio, content_type, language):
     if not transcription.is_configured():
-        return None, "Deepgram not configured (DEEPGRAM_API_KEY)"
+        return None, "Transcriber not configured (TRANSCRIBER_URL, SCORER_SECRET)"
     try:
-        # The clip's known language, not multi: with multi, a heavily accented clip can be transcribed as
-        # another language entirely (Japanese-accented Spanish came back in katakana) and fail the gate.
-        return transcription.transcribe(audio, content_type, language=language), ""
+        # The clip's known language, not auto-detection: a heavily accented clip can be detected as another
+        # language entirely (Japanese-accented Spanish) and fail the gate.
+        return transcription.transcribe(audio, content_type, language)[0], ""
     except transcription.TranscriptionError as exc:
         return None, str(exc)
 

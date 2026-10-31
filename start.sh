@@ -13,4 +13,5 @@ esac
 python manage.py migrate --noinput
 python manage.py ensure_superuser
 
-exec gunicorn config.wsgi:application --bind "0.0.0.0:${PORT:-8000}" --access-logfile -
+# Daphne serves HTTP and the recording websocket.
+exec daphne --bind 0.0.0.0 --port "${PORT:-8000}" --access-log - config.asgi:application

@@ -1,7 +1,7 @@
-// Turns the microphone into 16 kHz mono 16-bit PCM for Deepgram's live captions.
-// Raw PCM streams the same way on every browser; MediaRecorder's MP4 on iPhones doesn't.
+// Turns the microphone into 16 kHz mono 16-bit PCM, streamed to the server over /ws/record/.
+// Raw PCM streams the same way on every browser, and the server saves it as a WAV.
 const TARGET_RATE = 16000;
-const CHUNK_SAMPLES = 1280; // 80 ms per message, what Deepgram recommends for Flux
+const CHUNK_SAMPLES = 1280; // 80 ms per message
 
 class Pcm16Downsampler extends AudioWorkletProcessor {
   constructor() {

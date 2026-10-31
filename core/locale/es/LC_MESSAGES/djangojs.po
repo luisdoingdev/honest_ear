@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Honest Ear\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-31 15:10+0000\n"
+"POT-Creation-Date: 2026-10-31 16:29+0000\n"
 "PO-Revision-Date: 2026-10-30 17:30+0000\n"
 "Last-Translator: Honest Ear\n"
 "Language-Team: Spanish\n"
@@ -15,28 +15,62 @@ msgstr ""
 "Plural-Forms: nplurals=3; plural=n == 1 ? 0 : n != 0 && n % 1000000 == 0 ? "
 "1 : 2;\n"
 
-#: static/core/record.js:36
+#: static/core/record.js:5
+msgid "Recording is turned off right now."
+msgstr "La grabación está desactivada en este momento."
+
+#: static/core/record.js:6
+msgid "Recording is too long."
+msgstr "La grabación es demasiado larga."
+
+#: static/core/record.js:38
 msgid "Start session"
 msgstr "Empezar"
 
-#: static/core/record.js:36
+#: static/core/record.js:38
 msgid "Stop"
 msgstr "Detener"
 
-#: static/core/record.js:37
+#: static/core/record.js:39
 msgid "Record again"
 msgstr "Grabar otra vez"
 
-#: static/core/record.js:57
+#: static/core/record.js:58
 #, javascript-format
 msgid "Listening… %s"
 msgstr "Escuchando… %s"
 
-#: static/core/record.js:83
+#: static/core/record.js:110
+msgid "Every sound matched."
+msgstr "Todos los sonidos coinciden."
+
+#: static/core/record.js:111
+#, javascript-format
+msgid "%s changes across %s expected sounds."
+msgstr "%s cambios en %s sonidos esperados."
+
+#: static/core/record.js:126
 msgid "No speech detected."
 msgstr "No se detectó voz."
 
-#: static/core/record.js:185
+#: static/core/record.js:173
+msgid "Transcribing…"
+msgstr "Transcribiendo…"
+
+#: static/core/record.js:181
+#, javascript-format
+msgid "Couldn't load the recording: %s"
+msgstr "No se pudo cargar la grabación: %s"
+
+#: static/core/record.js:186
+msgid "Tap Play to hear it. It's deleted when it finishes."
+msgstr "Toca Reproducir para escucharla. Se borra cuando termina."
+
+#: static/core/record.js:194
+msgid "The connection was lost. Try again."
+msgstr "Se perdió la conexión. Inténtalo de nuevo."
+
+#: static/core/record.js:239
 msgid ""
 "Microphone access was denied. Allow it in your browser settings and try "
 "again."
@@ -44,46 +78,37 @@ msgstr ""
 "No se permitió el acceso al micrófono. Actívalo en la configuración del "
 "navegador y vuelve a intentarlo."
 
-#: static/core/record.js:210
-msgid "Transcribing…"
-msgstr "Transcribiendo…"
-
-#: static/core/record.js:242
-msgid "Tap Play to hear it. It's deleted when it finishes."
-msgstr "Toca Reproducir para escucharla. Se borra cuando termina."
-
-#: static/core/record.js:246
-#, javascript-format
-msgid "Upload failed: %s"
-msgstr "No se pudo subir: %s"
-
-#: static/core/record.js:252
-msgid "Recording needs a secure connection. Open this page over HTTPS."
-msgstr ""
-"Para grabar se necesita una conexión segura. Abre esta página con HTTPS."
-
-#: static/core/record.js:258
+#: static/core/record.js:256 static/core/record.js:276
 msgid "This browser can't record audio. Try a recent Chrome or Safari."
 msgstr ""
 "Este navegador no puede grabar audio. Prueba con una versión reciente de "
 "Chrome o Safari."
 
+#: static/core/record.js:264
+msgid "Saving…"
+msgstr "Guardando…"
+
 #: static/core/record.js:270
+msgid "Recording needs a secure connection. Open this page over HTTPS."
+msgstr ""
+"Para grabar se necesita una conexión segura. Abre esta página con HTTPS."
+
+#: static/core/record.js:288
 msgid "Playing…"
 msgstr "Reproduciendo…"
 
-#: static/core/record.js:272
+#: static/core/record.js:290
 msgid "Couldn't play the recording."
 msgstr "No se pudo reproducir la grabación."
 
-#: static/core/record.js:284
+#: static/core/record.js:302
 msgid "Kept for evaluation. Tap the mic to record again."
 msgstr "Se guardó para evaluación. Toca el micrófono para grabar otra vez."
 
-#: static/core/record.js:285
+#: static/core/record.js:303
 msgid "Deleted. Tap the mic to record again."
 msgstr "Borrada. Toca el micrófono para grabar otra vez."
 
-#: static/core/record.js:288
+#: static/core/record.js:306
 msgid "Played, but deleting failed. It will be removed automatically."
 msgstr "Se reprodujo, pero no se pudo borrar. Se eliminará automáticamente."

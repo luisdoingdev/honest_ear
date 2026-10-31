@@ -1,112 +1,288 @@
+import asyncio
+import json
 import shutil
 import tempfile
 from datetime import timedelta
 from unittest import mock
-from urllib.parse import parse_qs, urlparse
 
 import httpx
+from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
-from django.core.cache import cache
-from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import Client, SimpleTestCase, TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
+from config.asgi import application
 from . import scoring, transcription
+from .analysis import pcm_to_wav
+from .consumers import RecordingConsumer
 from .models import Attempt, EvalClip, FeatureFlag, Recording
 from .tasks import delete_stale_recordings
-from .transcription import DEEPGRAM_URL
-from .views import MAX_RECORDING_BYTES
 
 
-# Real keys in .env must never make tests call (and bill) Deepgram or the Modal scorer.
-@override_settings(DEEPGRAM_API_KEY="", SCORER_URL="")
+# Real URLs in .env must never make tests call the scorer or the transcriber.
+@override_settings(SCORER_URL="", TRANSCRIBER_URL="")
 class OfflineTestCase(TestCase):
     pass
 
 
-def audio_file(size=1024, content_type="audio/webm"):
-    return SimpleUploadedFile("recording", b"\x01" * size, content_type=content_type)
+# 0.1 s of 16 kHz 16-bit PCM, as pcm-worklet.js sends it.
+PCM_CHUNK = b"\x01\x00" * 1600
 
 
-class RecordingApiTests(OfflineTestCase):
-    def upload(self, **kwargs):
-        return self.client.post("/api/recordings/", {"audio": audio_file(**kwargs)})
+def make_recording(content_type="audio/wav", audio=b"\x01" * 1024):
+    return Recording.objects.create(audio=audio, content_type=content_type, size=len(audio))
 
-    def test_upload_fetch_then_delete(self):
-        res = self.upload()
-        self.assertEqual(res.status_code, 201)
-        data = res.json()
 
-        audio = self.client.get(data["audio_url"])
+def socket():
+    """The page's side of /ws/record/, straight to the consumer (the origin check is tested on its own)."""
+    return WebsocketCommunicator(RecordingConsumer.as_asgi(), "/ws/record/")
+
+
+async def record(*chunks):
+    """Streams the chunks, stops, and returns every message the server pushed and its close code."""
+    ws = socket()
+    connected, _ = await ws.connect()
+    assert connected
+    assert await ws.receive_json_from() == {"type": "ready"}
+    for chunk in chunks:
+        await ws.send_to(bytes_data=chunk)
+    await ws.send_to(text_data=json.dumps({"type": "stop"}))
+    messages = []
+    while True:
+        output = await ws.receive_output(timeout=10)
+        if output["type"] == "websocket.close":
+            return messages, output.get("code", 1000)
+        messages.append(json.loads(output["text"]))
+
+
+class RecordingPlaybackTests(OfflineTestCase):
+    def test_fetch_then_delete(self):
+        recording = make_recording()
+        audio = self.client.get(f"/api/recordings/{recording.pk}/audio/")
         self.assertEqual(audio.status_code, 200)
         self.assertEqual(audio.content, b"\x01" * 1024)
-        self.assertEqual(audio["Content-Type"], "audio/webm")
+        self.assertEqual(audio["Content-Type"], "audio/wav")
         self.assertEqual(audio["Cache-Control"], "no-store")
 
-        self.assertEqual(self.client.delete(f"/api/recordings/{data['id']}/").status_code, 204)
+        self.assertEqual(self.client.delete(f"/api/recordings/{recording.pk}/").status_code, 204)
         self.assertFalse(Recording.objects.exists())
 
-    def test_logs_each_step_of_a_recording(self):
-        with self.assertLogs("core.views", level="INFO") as logs:
-            data = self.upload().json()
-            self.client.get(data["audio_url"])
-            self.client.delete(f"/api/recordings/{data['id']}/")
-            self.client.delete(f"/api/recordings/{data['id']}/")
+    def test_deleted_recording_is_gone_and_delete_is_repeatable(self):
+        recording = make_recording()
+        self.client.delete(f"/api/recordings/{recording.pk}/")
+        self.assertEqual(self.client.get(f"/api/recordings/{recording.pk}/audio/").status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/recordings/{recording.pk}/").status_code, 204)
 
-        rid = data["id"]
+    def test_logs_playback_and_deletion(self):
+        recording = make_recording()
+        rid = recording.pk
+        with self.assertLogs("core.views", level="INFO") as logs:
+            self.client.get(f"/api/recordings/{rid}/audio/")
+            self.client.delete(f"/api/recordings/{rid}/")
+            self.client.delete(f"/api/recordings/{rid}/")
         self.assertEqual(
             logs.output,
             [
-                f"INFO:core.views:Recording {rid} created (1024 bytes, audio/webm)",
                 f"INFO:core.views:Recording {rid} served (1024 bytes)",
                 f"INFO:core.views:Recording {rid} deleted after playback",
                 f"INFO:core.views:Recording {rid} delete requested but already gone",
             ],
         )
 
-    def test_logs_rejections_as_warnings(self):
-        with self.assertLogs("core.views", level="WARNING") as logs:
-            self.upload(content_type="text/plain")
-        self.assertEqual(
-            logs.output, ["WARNING:core.views:Recording rejected: unsupported type text/plain (1024 bytes)"]
-        )
-
-    def test_deleted_recording_is_gone_and_delete_is_repeatable(self):
-        data = self.upload().json()
-        self.client.delete(f"/api/recordings/{data['id']}/")
-
-        self.assertEqual(self.client.get(data["audio_url"]).status_code, 404)
-        self.assertEqual(self.client.delete(f"/api/recordings/{data['id']}/").status_code, 204)
-
-    def test_accepts_safari_mp4(self):
-        res = self.upload(content_type="audio/mp4")
-        self.assertEqual(res.status_code, 201)
-        self.assertEqual(Recording.objects.get().content_type, "audio/mp4")
-
-    def test_rejects_missing_audio(self):
-        self.assertEqual(self.client.post("/api/recordings/").status_code, 400)
-
-    def test_rejects_wrong_type(self):
-        self.assertEqual(self.upload(content_type="text/plain").status_code, 415)
-        self.assertFalse(Recording.objects.exists())
-
-    def test_rejects_oversized_upload(self):
-        self.assertEqual(self.upload(size=MAX_RECORDING_BYTES + 1).status_code, 413)
-        self.assertFalse(Recording.objects.exists())
-
-    def test_requires_csrf_token(self):
-        client = Client(enforce_csrf_checks=True)
-        res = client.post("/api/recordings/", {"audio": audio_file()})
-        self.assertEqual(res.status_code, 403)
-
     def test_home_page_is_the_recorder(self):
         res = self.client.get("/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, 'name="csrf-token"')
         self.assertContains(res, "Start session")
+        self.assertNotContains(res, "data-live-captions")
 
     def test_old_record_url_redirects_home(self):
         self.assertRedirects(self.client.get("/record/"), "/", fetch_redirect_response=False)
+
+    def test_the_upload_and_token_endpoints_are_gone(self):
+        self.assertEqual(self.client.post("/api/recordings/").status_code, 404)
+        self.assertEqual(self.client.post("/api/transcription/token/").status_code, 404)
+
+
+SPANISH = {"phonemes": "m e ɣ u s t a ɾ i a r e s e ɾ β a", "inference_ms": 900.0, "duration_s": 2.1}
+
+
+@override_settings(TRANSCRIBER_URL="http://transcriber:8000/", SCORER_URL="http://scorer:8000/", SCORER_SECRET="s")
+class RecordingSocketTests(TransactionTestCase):
+    """The page streams PCM up; the server saves a WAV and pushes wav2vec2's and Whisper's results back.
+
+    TransactionTestCase: Channels closes the database connection around each sync call, which TestCase's
+    wrapping transaction can't survive. serialized_rollback restores the seeded feature flags after each test.
+    """
+
+    serialized_rollback = True
+
+    def setUp(self):
+        patches = {
+            "whisper": mock.patch("core.transcription.transcribe", return_value=("Me gustaría reservar", "es")),
+            "scorer": mock.patch("core.scoring.phonemes_for", return_value=SPANISH),
+        }
+        self.mocks = {name: patcher.start() for name, patcher in patches.items()}
+        for patcher in patches.values():
+            self.addCleanup(patcher.stop)
+
+    async def test_saves_a_wav_then_pushes_phonemes_transcript_and_pairs(self):
+        messages, code = await record(PCM_CHUNK, PCM_CHUNK)
+
+        self.assertEqual(code, 1000)
+        self.assertEqual([m["type"] for m in messages][0], "recording", "Play works before any result is in")
+        self.assertEqual({m["type"] for m in messages[1:3]}, {"phonemes", "transcript"})
+        self.assertEqual(messages[-1]["type"], "pairs")
+        by_type = {m["type"]: m for m in messages}
+
+        recording = await Recording.objects.aget(pk=by_type["recording"]["id"])
+        self.assertEqual(by_type["recording"]["audio_url"], f"/api/recordings/{recording.pk}/audio/")
+        self.assertEqual(recording.content_type, "audio/wav")
+        self.assertEqual(bytes(recording.audio), pcm_to_wav(PCM_CHUNK * 2))
+        # Both services get the same WAV; Whisper detects the language.
+        self.assertEqual(self.mocks["scorer"].call_args.args, (bytes(recording.audio), "audio/wav"))
+        self.assertEqual(self.mocks["whisper"].call_args.args, (bytes(recording.audio), "audio/wav"))
+
+        self.assertEqual(by_type["phonemes"], {"type": "phonemes", "phonemes": SPANISH["phonemes"]})
+        self.assertEqual(by_type["transcript"], {"type": "transcript", "transcript": "Me gustaría reservar"})
+        attempt = await Attempt.objects.aget(pk=by_type["pairs"]["attempt_id"])
+        self.assertEqual(attempt.transcript_source, Attempt.TranscriptSource.LOCAL)
+        self.assertEqual(attempt.phonemes, SPANISH["phonemes"])
+        self.assertEqual(attempt.alignment, by_type["pairs"]["alignment"])
+        self.assertEqual(attempt.alignment_language, "es")
+
+    async def test_pairs_each_word_with_its_expected_and_heard_phonemes(self):
+        messages, _ = await record(PCM_CHUNK)
+        alignment = messages[-1]["alignment"]
+        self.assertEqual([w["word"] for w in alignment], ["me", "gustaría", "reservar"])
+        self.assertEqual([op["op"] for op in alignment[0]["ops"]], ["match", "match"])
+        reservar = alignment[2]["ops"]
+        # Heard-only phonemes stay with their word; drifts are marked, matches aren't.
+        self.assertEqual("".join(op["heard"] or "" for op in reservar), "reseɾβa")
+        self.assertTrue(any(op["op"] != "match" for op in reservar))
+
+    async def test_phonemes_arrive_without_waiting_for_whisper(self):
+        whisper_may_finish = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def slow_whisper(*_):
+            asyncio.run_coroutine_threadsafe(whisper_may_finish.wait(), loop).result(timeout=5)
+            return "Me gustaría reservar", "es"
+
+        self.mocks["whisper"].side_effect = slow_whisper
+        ws = socket()
+        await ws.connect()
+        await ws.receive_json_from()
+        await ws.send_to(bytes_data=PCM_CHUNK)
+        await ws.send_to(text_data=json.dumps({"type": "stop"}))
+        self.assertEqual((await ws.receive_json_from(timeout=5))["type"], "recording")
+        self.assertEqual((await ws.receive_json_from(timeout=5))["type"], "phonemes", "while Whisper is still busy")
+        whisper_may_finish.set()
+        self.assertEqual((await ws.receive_json_from(timeout=5))["type"], "transcript")
+        self.assertEqual((await ws.receive_json_from(timeout=5))["type"], "pairs")
+        await ws.disconnect()
+
+    async def test_a_service_failing_never_loses_the_other(self):
+        self.mocks["whisper"].side_effect = transcription.TranscriptionError("Transcriber timed out after 60s")
+        with self.assertLogs("core.analysis", level="WARNING"):
+            messages, code = await record(PCM_CHUNK)
+        by_type = {m["type"]: m for m in messages}
+        self.assertEqual(code, 1000)
+        self.assertEqual(by_type["transcript"], {"type": "transcript", "transcript": None, "error": "Couldn't transcribe this recording."})
+        self.assertEqual(by_type["phonemes"]["phonemes"], SPANISH["phonemes"])
+        self.assertEqual(by_type["pairs"]["alignment"], [])
+        attempt = await Attempt.objects.aget()
+        self.assertEqual(attempt.transcript_error, "Transcriber timed out after 60s")
+        self.assertEqual(attempt.transcript_source, Attempt.TranscriptSource.NONE)
+        self.assertEqual(attempt.phonemes, SPANISH["phonemes"])
+
+    async def test_scorer_down_still_saves_the_transcript(self):
+        self.mocks["scorer"].side_effect = scoring.ScorerError("Scorer timed out after 30s (cold start?)")
+        with self.assertLogs("core.analysis", level="WARNING"):
+            messages, _ = await record(PCM_CHUNK)
+        by_type = {m["type"]: m for m in messages}
+        self.assertIsNone(by_type["phonemes"]["phonemes"])
+        self.assertEqual(by_type["transcript"]["transcript"], "Me gustaría reservar")
+        attempt = await Attempt.objects.aget()
+        self.assertEqual(attempt.scorer_error, "Scorer timed out after 30s (cold start?)")
+        self.assertEqual(attempt.alignment_language, "")
+
+    async def test_nothing_is_paired_for_a_language_without_an_espeak_voice(self):
+        self.mocks["whisper"].return_value = ("Eu gostaria", "pt")
+        messages, _ = await record(PCM_CHUNK)
+        self.assertEqual(messages[-1]["alignment"], [])
+
+    @override_settings(TRANSCRIBER_URL="", SCORER_URL="")
+    async def test_without_the_services_the_recording_still_works(self):
+        messages, code = await record(PCM_CHUNK)
+        self.assertEqual(code, 1000)
+        by_type = {m["type"]: m for m in messages}
+        self.assertEqual(by_type["transcript"], {"type": "transcript", "transcript": None})
+        self.assertIsNone(by_type["phonemes"]["phonemes"])
+        self.mocks["whisper"].assert_not_called()
+        self.mocks["scorer"].assert_not_called()
+
+    async def test_transcription_flag_off_skips_whisper(self):
+        await FeatureFlag.objects.filter(name="transcription").aupdate(enabled=False)
+        messages, _ = await record(PCM_CHUNK)
+        self.assertIsNone({m["type"]: m for m in messages}["transcript"]["transcript"])
+        self.mocks["whisper"].assert_not_called()
+
+    async def test_stop_without_audio_is_an_error_and_saves_nothing(self):
+        messages, code = await record()
+        self.assertEqual(messages, [{"type": "error", "error": "No audio was recorded."}])
+        self.assertEqual(code, 1000)
+        self.assertFalse(await Recording.objects.aexists())
+
+    async def test_leaving_before_stop_saves_nothing(self):
+        ws = socket()
+        await ws.connect()
+        await ws.receive_json_from()
+        await ws.send_to(bytes_data=PCM_CHUNK)
+        await ws.disconnect()
+        self.assertFalse(await Recording.objects.aexists())
+        self.mocks["scorer"].assert_not_called()
+
+    async def test_hangs_up_after_too_much_audio(self):
+        ws = socket()
+        await ws.connect()
+        await ws.receive_json_from()
+        with mock.patch("core.consumers.MAX_BYTES", len(PCM_CHUNK) + 1), self.assertLogs("core.consumers", level="WARNING"):
+            await ws.send_to(bytes_data=PCM_CHUNK)
+            await ws.send_to(bytes_data=PCM_CHUNK)
+            self.assertEqual(await ws.receive_output(timeout=2), {"type": "websocket.close", "code": 4413})
+        self.assertFalse(await Recording.objects.aexists())
+
+    async def test_ignores_unknown_and_malformed_messages(self):
+        ws = socket()
+        await ws.connect()
+        await ws.receive_json_from()
+        await ws.send_to(text_data="not json")
+        await ws.send_to(text_data=json.dumps({"type": "Configure"}))
+        self.assertTrue(await ws.receive_nothing(timeout=0.2))
+        await ws.disconnect()
+
+    async def test_phonemes_and_words_are_never_logged(self):
+        with self.assertLogs("core", level="INFO") as logs:
+            await record(PCM_CHUNK)
+        joined = "\n".join(logs.output)
+        self.assertIn("phonemes (33 characters, 900 ms inference, 2.10 s audio)", joined)
+        self.assertIn("transcribed (es, 20 characters)", joined)
+        self.assertNotIn("ɣ", joined)
+        self.assertNotIn("gustaría", joined)
+
+    async def test_the_socket_is_refused_when_recording_is_off(self):
+        await FeatureFlag.objects.filter(name="recording").aupdate(enabled=False)
+        with self.assertLogs("core.consumers", level="WARNING") as logs:
+            ws = socket()
+            await ws.connect()
+            self.assertEqual(await ws.receive_output(timeout=2), {"type": "websocket.close", "code": 4503})
+        self.assertIn("feature flag is off", logs.output[0])
+
+    async def test_pages_from_other_sites_cant_open_a_socket(self):
+        ws = WebsocketCommunicator(application, "/ws/record/", headers=[(b"origin", b"https://evil.example")])
+        connected, _ = await ws.connect()
+        self.assertFalse(connected)
 
 
 class LanguageTests(OfflineTestCase):
@@ -129,206 +305,6 @@ class LanguageTests(OfflineTestCase):
     def test_varies_by_language_so_caches_keep_them_apart(self):
         res = self.client.get("/", headers={"accept-language": "es-MX"})
         self.assertIn("Accept-Language", res["Vary"])
-
-    def test_api_errors_are_translated(self):
-        res = self.client.post(
-            "/api/recordings/",
-            {"audio": audio_file(content_type="text/plain")},
-            headers={"accept-language": "es-MX"},
-        )
-        self.assertEqual(res.json()["error"], "Tipo de audio no compatible: text/plain")
-
-    def test_javascript_messages_are_translated(self):
-        res = self.client.get("/jsi18n/", headers={"accept-language": "es-MX"})
-        self.assertContains(res, "Escuchando")
-
-
-def deepgram_reply(transcript="", status=200, body=None):
-    body = body or {"results": {"channels": [{"alternatives": [{"transcript": transcript}]}]}}
-    return httpx.Response(status, json=body, request=httpx.Request("POST", DEEPGRAM_URL))
-
-
-@override_settings(DEEPGRAM_API_KEY="test-key", SCORER_URL="")
-@mock.patch("core.transcription.httpx.post")
-class TranscriptionTests(TestCase):
-    def upload(self, language="es-CO"):
-        return self.client.post(
-            "/api/recordings/", {"audio": audio_file()}, headers={"accept-language": language}
-        )
-
-    def test_upload_returns_the_transcript(self, post):
-        post.return_value = deepgram_reply("Hola, ¿cómo estás?")
-        res = self.upload()
-        self.assertEqual(res.status_code, 201)
-        self.assertEqual(res.json()["transcript"], "Hola, ¿cómo estás?")
-
-    def test_every_browser_is_transcribed_in_multi_and_opted_out_of_training(self, post):
-        post.return_value = deepgram_reply("hi")
-        self.upload(language="es-CO")
-        self.upload(language="en-US")
-
-        for call in post.call_args_list:
-            self.assertEqual(call.args, (DEEPGRAM_URL,))
-            self.assertEqual(
-                call.kwargs["params"],
-                {"model": "nova-3", "language": "multi", "smart_format": "true", "mip_opt_out": "true"},
-            )
-            self.assertEqual(call.kwargs["headers"]["Authorization"], "Token test-key")
-            self.assertEqual(call.kwargs["headers"]["Content-Type"], "audio/webm")
-            self.assertEqual(call.kwargs["content"], b"\x01" * 1024)
-
-    def test_deepgrams_reason_for_rejecting_a_request_is_logged(self, post):
-        post.return_value = deepgram_reply(status=400, body={"err_msg": "Bad Request: bad option"})
-        with self.assertLogs("core.views", level="WARNING") as logs:
-            self.assertIsNone(self.upload().json()["transcript"])
-        self.assertIn("Deepgram returned HTTP 400: Bad Request: bad option", logs.output[0])
-
-    def test_silence_returns_an_empty_transcript(self, post):
-        post.return_value = deepgram_reply("")
-        self.assertEqual(self.upload().json()["transcript"], "")
-
-    def test_transcript_text_is_never_logged(self, post):
-        post.return_value = deepgram_reply("my private words")
-        with self.assertLogs("core.views", level="INFO") as logs:
-            rid = self.upload().json()["id"]
-        self.assertIn(f"INFO:core.views:Recording {rid} transcribed (multi, 16 characters)", logs.output)
-        self.assertNotIn("private", "\n".join(logs.output))
-
-    def test_deepgram_down_still_keeps_the_recording(self, post):
-        post.side_effect = httpx.ConnectError("boom")
-        with self.assertLogs("core.views", level="WARNING") as logs:
-            res = self.upload()
-        data = res.json()
-        self.assertEqual(res.status_code, 201)
-        self.assertIsNone(data["transcript"])
-        self.assertEqual(data["transcript_error"], "No se pudo transcribir esta grabación.")
-        self.assertEqual(self.client.get(data["audio_url"]).status_code, 200)
-        self.assertIn("Deepgram request failed: ConnectError", logs.output[0])
-
-    def test_deepgram_rejecting_the_key_is_logged_with_its_status(self, post):
-        post.return_value = deepgram_reply(status=401)
-        with self.assertLogs("core.views", level="WARNING") as logs:
-            self.assertIsNone(self.upload().json()["transcript"])
-        self.assertIn("Deepgram returned HTTP 401", logs.output[0])
-
-    def test_flag_off_skips_deepgram(self, post):
-        FeatureFlag.objects.filter(name="transcription").update(enabled=False)
-        self.assertIsNone(self.upload().json()["transcript"])
-        post.assert_not_called()
-
-    @override_settings(DEEPGRAM_API_KEY="")
-    def test_no_api_key_skips_deepgram(self, post):
-        data = self.upload().json()
-        self.assertIsNone(data["transcript"])
-        self.assertNotIn("transcript_error", data)
-        post.assert_not_called()
-
-
-def grant_reply(status=200, body=None):
-    body = body or {"access_token": "jwt-secret-value", "expires_in": 30}
-    return httpx.Response(status, json=body, request=httpx.Request("POST", "https://api.deepgram.com/v1/auth/grant"))
-
-
-@override_settings(
-    DEEPGRAM_API_KEY="test-key",
-    SCORER_URL="",
-    CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
-)
-@mock.patch("core.transcription.httpx.post")
-class LiveCaptionTests(TestCase):
-    def setUp(self):
-        cache.clear()
-
-    def token(self, **headers):
-        return self.client.post("/api/transcription/token/", headers=headers)
-
-    def test_issues_a_short_lived_token_and_the_server_chosen_stream_url(self, post):
-        post.return_value = grant_reply()
-        data = self.token().json()
-
-        self.assertEqual(data["protocols"], ["bearer", "jwt-secret-value"])
-        url = urlparse(data["url"])
-        # Flux (turn-based) on /v2: v1-only options such as interim_results would make it refuse the stream.
-        self.assertEqual(f"{url.scheme}://{url.netloc}{url.path}", "wss://api.deepgram.com/v2/listen")
-        self.assertEqual(
-            parse_qs(url.query),
-            {
-                "model": ["flux-general-multi"],
-                "language_hint": ["es", "en"],
-                "encoding": ["linear16"],
-                "sample_rate": ["16000"],
-                "mip_opt_out": ["true"],
-            },
-        )
-        call = post.call_args
-        self.assertEqual(call.args, ("https://api.deepgram.com/v1/auth/grant",))
-        self.assertEqual(call.kwargs["headers"], {"Authorization": "Token test-key"})
-        self.assertEqual(call.kwargs["json"], {"ttl_seconds": 30})
-
-    def test_the_token_is_never_logged(self, post):
-        post.return_value = grant_reply()
-        with self.assertLogs("core.views", level="INFO") as logs:
-            self.token()
-        self.assertEqual(logs.output, ["INFO:core.views:Live captions token issued for 127.0.0.1"])
-
-    def test_requires_a_csrf_token(self, post):
-        res = Client(enforce_csrf_checks=True).post("/api/transcription/token/")
-        self.assertEqual(res.status_code, 403)
-        post.assert_not_called()
-
-    def test_unavailable_when_either_flag_is_off(self, post):
-        for flag in ["live_captions", "transcription"]:
-            with self.subTest(flag=flag):
-                FeatureFlag.objects.filter(name=flag).update(enabled=False)
-                self.assertEqual(self.token().status_code, 503)
-                self.assertContains(self.client.get("/"), 'data-live-captions="false"')
-                FeatureFlag.objects.filter(name=flag).update(enabled=True)
-        post.assert_not_called()
-
-    @override_settings(DEEPGRAM_API_KEY="")
-    def test_unavailable_without_an_api_key(self, post):
-        self.assertEqual(self.token().status_code, 503)
-        post.assert_not_called()
-
-    def test_page_offers_live_captions_when_available(self, post):
-        self.assertContains(self.client.get("/"), 'data-live-captions="true"')
-
-    def test_deepgram_refusing_the_grant_is_logged_and_returns_503(self, post):
-        post.return_value = grant_reply(status=403, body={"err_msg": "Insufficient permissions."})
-        with self.assertLogs("core.views", level="WARNING") as logs:
-            res = self.token()
-        self.assertEqual(res.status_code, 503)
-        self.assertNotIn("protocols", res.json())
-        self.assertIn("Deepgram returned HTTP 403: Insufficient permissions.", logs.output[0])
-
-    def test_limits_each_ip_to_ten_tokens_a_minute(self, post):
-        post.return_value = grant_reply()
-        for _ in range(10):
-            self.assertEqual(self.token().status_code, 200)
-        self.assertEqual(self.token().status_code, 429)
-        self.assertEqual(self.token(x_forwarded_for="198.51.100.7").status_code, 200, "other IPs unaffected")
-
-    def test_rate_limit_uses_the_address_renders_proxy_appended(self, post):
-        post.return_value = grant_reply()
-        for _ in range(10):
-            self.token(x_forwarded_for="6.6.6.6, 203.0.113.9")
-        # Forging a different first entry doesn't escape the limit for 203.0.113.9.
-        self.assertEqual(self.token(x_forwarded_for="1.2.3.4, 203.0.113.9").status_code, 429)
-
-    def test_refuses_when_the_rate_limit_cache_is_down(self, post):
-        with mock.patch("core.views.cache.incr", side_effect=ConnectionError("redis down")):
-            with self.assertLogs("core.views", level="ERROR"):
-                self.assertEqual(self.token().status_code, 503)
-        post.assert_not_called()
-
-    def test_upload_with_a_live_transcript_skips_deepgram(self, post):
-        with self.assertLogs("core.views", level="INFO") as logs:
-            res = self.client.post("/api/recordings/", {"audio": audio_file(), "live_transcript": "Hola"})
-        self.assertEqual(res.status_code, 201)
-        self.assertNotIn("transcript", res.json())
-        self.assertIn("already transcribed live", logs.output[-1])
-        self.assertEqual(Attempt.objects.get().transcript, "Hola")
-        post.assert_not_called()
 
 
 def scorer_reply(status=200, body=None):
@@ -376,97 +352,6 @@ class ScorerClientTests(SimpleTestCase):
         self.assertFalse(scoring.is_configured())
 
 
-@override_settings(DEEPGRAM_API_KEY="test-key", SCORER_URL="https://scorer.example/phonemes", SCORER_SECRET="s")
-class AttemptTests(TestCase):
-    """One clip in: Deepgram's transcript and Modal's phonemes saved side by side."""
-
-    def setUp(self):
-        for target, name in [("core.scoring.phonemes_for", "scorer"), ("core.transcription.transcribe", "deepgram")]:
-            patcher = mock.patch(target)
-            setattr(self, name, patcher.start())
-            self.addCleanup(patcher.stop)
-        self.scorer.return_value = {"phonemes": "o l a k o m o", "inference_ms": 41.5, "duration_s": 2.48}
-        self.deepgram.return_value = "Hola, ¿cómo estás?"
-
-    def upload(self, **fields):
-        return self.client.post("/api/recordings/", {"audio": audio_file(), **fields})
-
-    def test_saves_the_deepgram_transcript_next_to_the_phonemes(self):
-        data = self.upload().json()
-
-        attempt = Attempt.objects.get(pk=data["attempt_id"])
-        self.assertEqual(attempt.transcript, "Hola, ¿cómo estás?")
-        self.assertEqual(attempt.transcript_source, Attempt.TranscriptSource.DEEPGRAM)
-        self.assertEqual(attempt.phonemes, "o l a k o m o")
-        self.assertEqual((attempt.phoneme_inference_ms, attempt.audio_duration_s), (41.5, 2.48))
-        self.assertEqual((attempt.scorer_error, attempt.transcript_error), ("", ""))
-        self.assertEqual(data["phonemes"], "o l a k o m o")
-        self.assertEqual(data["transcript"], "Hola, ¿cómo estás?")
-        # The very same bytes went to both services.
-        self.assertEqual(self.scorer.call_args.args, (b"\x01" * 1024, "audio/webm"))
-        self.assertEqual(self.deepgram.call_args.args, (b"\x01" * 1024, "audio/webm"))
-
-    def test_live_caption_text_is_kept_and_deepgram_is_not_paid_again(self):
-        data = self.upload(live_transcript="Hola desde Medellín").json()
-
-        attempt = Attempt.objects.get(pk=data["attempt_id"])
-        self.assertEqual(attempt.transcript, "Hola desde Medellín")
-        self.assertEqual(attempt.transcript_source, Attempt.TranscriptSource.LIVE)
-        self.assertEqual(attempt.phonemes, "o l a k o m o")
-        self.deepgram.assert_not_called()
-
-    def test_live_text_is_capped(self):
-        self.upload(live_transcript="a" * 20_000)
-        self.assertEqual(len(Attempt.objects.get().transcript), 10_000)
-
-    def test_a_cold_or_down_scorer_never_fails_the_upload(self):
-        self.scorer.side_effect = scoring.ScorerError("Scorer timed out after 10s (cold start?)")
-        with self.assertLogs("core.views", level="WARNING") as logs:
-            res = self.upload()
-
-        self.assertEqual(res.status_code, 201)
-        self.assertIsNone(res.json()["phonemes"])
-        attempt = Attempt.objects.get()
-        self.assertIsNone(attempt.phonemes)
-        self.assertEqual(attempt.scorer_error, "Scorer timed out after 10s (cold start?)")
-        self.assertEqual(attempt.transcript, "Hola, ¿cómo estás?", "the transcript is still saved")
-        self.assertIn("not scored: Scorer timed out", logs.output[0])
-
-    def test_deepgram_failing_still_saves_the_phonemes(self):
-        self.deepgram.side_effect = transcription.TranscriptionError("Deepgram returned HTTP 502")
-        with self.assertLogs("core.views", level="WARNING"):
-            self.upload()
-        attempt = Attempt.objects.get()
-        self.assertEqual(attempt.phonemes, "o l a k o m o")
-        self.assertIsNone(attempt.transcript)
-        self.assertEqual(attempt.transcript_source, Attempt.TranscriptSource.NONE)
-        self.assertEqual(attempt.transcript_error, "Deepgram returned HTTP 502")
-
-    @override_settings(SCORER_URL="")
-    def test_scorer_not_configured_skips_it(self):
-        self.upload()
-        self.scorer.assert_not_called()
-        self.assertIsNone(Attempt.objects.get().phonemes)
-        self.assertEqual(Attempt.objects.get().scorer_error, "")
-
-    def test_the_words_outlive_the_audio(self):
-        data = self.upload().json()
-        self.client.delete(f"/api/recordings/{data['id']}/")
-
-        self.assertFalse(Recording.objects.exists())
-        attempt = Attempt.objects.get(pk=data["attempt_id"])
-        self.assertIsNone(attempt.recording)
-        self.assertEqual(attempt.phonemes, "o l a k o m o")
-
-    def test_phonemes_and_words_are_never_logged(self):
-        with self.assertLogs("core.views", level="INFO") as logs:
-            self.upload()
-        joined = "\n".join(logs.output)
-        self.assertIn("phonemes (13 characters, 42 ms inference, 2.48 s audio)", joined)
-        self.assertNotIn("o l a k o m o", joined)
-        self.assertNotIn("Hola", joined)
-
-
 class StaleRecordingCleanupTests(OfflineTestCase):
     def test_deletes_only_old_recordings(self):
         old = Recording.objects.create(audio=b"old", content_type="audio/webm", size=3)
@@ -494,24 +379,15 @@ class RecordingFeatureFlagTests(OfflineTestCase):
         self.assertNotContains(res, "Start session")
         self.assertNotContains(res, "record.js")
 
-    def test_upload_refused_when_off(self):
-        self.turn_off()
-        with self.assertLogs("core.views", level="WARNING") as logs:
-            res = self.client.post("/api/recordings/", {"audio": audio_file()})
-        self.assertEqual(res.status_code, 503)
-        self.assertFalse(Recording.objects.exists())
-        self.assertIn("feature flag is off", logs.output[0])
-
     def test_existing_recording_can_still_be_played_and_deleted_when_off(self):
-        data = self.client.post("/api/recordings/", {"audio": audio_file()}).json()
+        recording = make_recording()
         self.turn_off()
-        self.assertEqual(self.client.get(data["audio_url"]).status_code, 200)
-        self.assertEqual(self.client.delete(f"/api/recordings/{data['id']}/").status_code, 204)
+        self.assertEqual(self.client.get(f"/api/recordings/{recording.pk}/audio/").status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/recordings/{recording.pk}/").status_code, 204)
 
     def test_missing_flag_counts_as_off(self):
         FeatureFlag.objects.all().delete()
         self.assertFalse(FeatureFlag.is_enabled("recording"))
-        self.assertEqual(self.client.post("/api/recordings/", {"audio": audio_file()}).status_code, 503)
 
     def test_admin_can_turn_recording_off_and_it_is_logged(self):
         admin_user = get_user_model().objects.create_superuser("boss", "boss@example.com", "pw-123456")
@@ -536,7 +412,7 @@ class GoldenSetTests(TestCase):
     def setUp(self):
         media = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, media, ignore_errors=True)
-        override = override_settings(MEDIA_ROOT=media, DEEPGRAM_API_KEY="", SCORER_URL="")
+        override = override_settings(MEDIA_ROOT=media, SCORER_URL="", TRANSCRIBER_URL="")
         override.enable()
         self.addCleanup(override.disable)
         self.client.force_login(get_user_model().objects.create_superuser("bench", "b@example.com", "pw-123456"))
@@ -544,9 +420,10 @@ class GoldenSetTests(TestCase):
     def keep_audio(self, on=True):
         FeatureFlag.objects.filter(name="keep_audio").update(enabled=on)
 
-    def record(self, content_type="audio/webm"):
-        data = self.client.post("/api/recordings/", {"audio": audio_file(content_type=content_type)}).json()
-        return data, Attempt.objects.get(pk=data["attempt_id"])
+    def record(self, content_type="audio/wav"):
+        recording = make_recording(content_type=content_type)
+        attempt = Attempt.objects.create(recording=recording, transcript="hola")
+        return {"id": str(recording.pk)}, attempt
 
     def promote(self, *attempts):
         return self.client.post(
@@ -584,7 +461,7 @@ class GoldenSetTests(TestCase):
         self.assertContains(res, "Promoted 1 attempt(s)")
         clip = EvalClip.objects.get()
         self.assertEqual(clip.source_attempt, attempt)
-        self.assertEqual((clip.intended_text, clip.human_label), ("", ""), "left for a human, never from Deepgram")
+        self.assertEqual((clip.intended_text, clip.human_label), ("", ""), "left for a human, never from the transcript")
         self.assertTrue(clip.audio.name.endswith(".mp4"))
         with clip.audio.open("rb") as f:
             self.assertEqual(f.read(), b"\x01" * 1024)

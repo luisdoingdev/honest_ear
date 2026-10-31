@@ -9,9 +9,11 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.core.management import CommandError, call_command
+import httpx
 from django.test import SimpleTestCase, TestCase, override_settings
 
-from . import bench, pronunciation, scoring
+from . import bench, pronunciation, scoring, transcription
+from .transcription import TranscriptionError
 from .models import EvalClip, EvalResult, EvalRun
 
 
@@ -59,7 +61,7 @@ class SummaryTests(SimpleTestCase):
         self.assertIsNone(summary["spearman"])
 
 
-@override_settings(DEEPGRAM_API_KEY="test-key", SCORER_URL="https://scorer.example/", SCORER_SECRET="s")
+@override_settings(SCORER_URL="https://scorer.example/", SCORER_SECRET="s", TRANSCRIBER_URL="http://transcriber:8000/")
 class RunBenchTests(TestCase):
     def setUp(self):
         media = tempfile.mkdtemp()
@@ -68,19 +70,24 @@ class RunBenchTests(TestCase):
         override.enable()
         self.addCleanup(override.disable)
         self.heard = {}
-        for target, name in [("core.scoring.phonemes_for", "scorer"), ("core.transcription.transcribe", "deepgram")]:
+        for target, name in [
+            ("core.scoring.phonemes_for", "scorer"),
+            ("core.transcription.transcribe", "whisper"),
+            ("core.transcription.model_name", "model"),
+        ]:
             patcher = mock.patch(target)
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
         # Each clip's audio is its own key, so the fakes answer per clip.
         self.scorer.side_effect = lambda audio, _: self.heard[audio]["scorer"]
-        self.deepgram.side_effect = lambda audio, _, language: self.heard[audio]["deepgram"]
+        self.whisper.side_effect = lambda audio, _, language: (self.heard[audio]["whisper"], language)
+        self.model.return_value = "faster-whisper-medium-int8"
 
     def clip(self, name, text, label, transcript, phonemes, duration=2.0):
         clip = EvalClip(intended_text=text, language="es", human_label=label)
         clip.audio.save(f"{name}.wav", ContentFile(name.encode()), save=True)
         self.heard[name.encode()] = {
-            "deepgram": transcript,
+            "whisper": transcript,
             "scorer": {"phonemes": phonemes, "inference_ms": 1.0, "duration_s": duration},
         }
         return clip
@@ -94,7 +101,7 @@ class RunBenchTests(TestCase):
         ]
         run = bench.run_bench(clips)
 
-        self.assertEqual(run.config, pronunciation.load_config())
+        self.assertEqual(run.config, {**pronunciation.load_config(), "transcriber": "local: faster-whisper-medium-int8"})
         self.assertEqual(run.config_version, str(run.config["version"]))
         by_name = {r.clip.audio.name.split("/")[-1].split(".")[0]: r for r in run.results.all()}
         self.assertEqual((by_name["good"].status, by_name["good"].per, by_name["good"].predicted_band), ("scored", 0.0, "good"))
@@ -104,8 +111,8 @@ class RunBenchTests(TestCase):
         self.assertEqual(by_name["good"].alignment[0]["word"], "hola")
         self.assertEqual(run.summary["judged"], 2)
         self.assertEqual(run.summary["agreement"], 100.0)
-        # Deepgram is told each clip's language instead of guessing it (multi).
-        self.assertEqual({c.kwargs["language"] for c in self.deepgram.call_args_list}, {"es"})
+        # Whisper is told each clip's language instead of detecting it.
+        self.assertEqual({c.args[2] for c in self.whisper.call_args_list}, {"es"})
 
     def test_the_label_at_run_time_is_kept(self):
         clip = self.clip("a", "hola", "good", "hola", "o l a")
@@ -264,3 +271,54 @@ class WriteEvalSummaryTests(TestCase):
     def test_without_runs_it_says_so(self):
         with self.assertRaisesMessage(CommandError, "No eval runs yet"):
             call_command("write_eval_summary", readme=str(self.readme("x")), stdout=StringIO())
+
+
+@override_settings(TRANSCRIBER_URL="http://transcriber:8000/", SCORER_SECRET="shared", TRANSCRIBER_TIMEOUT_SECONDS=45)
+@mock.patch("core.transcription.httpx.post")
+class TranscriberClientTests(SimpleTestCase):
+    def reply(self, status=200, body=None):
+        body = body if body is not None else {"transcript": "hola amigo", "language": "es", "model": "faster-whisper-medium-int8"}
+        return httpx.Response(status, json=body, request=httpx.Request("POST", "http://transcriber:8000/"))
+
+    def test_sends_the_clip_language_and_secret(self, post):
+        post.return_value = self.reply()
+        self.assertEqual(transcription.transcribe(b"clip", "audio/wav", "es"), ("hola amigo", "es"))
+        kwargs = post.call_args.kwargs
+        self.assertEqual(post.call_args.args, ("http://transcriber:8000/",))
+        self.assertEqual(kwargs["params"], {"language": "es"})
+        self.assertEqual(kwargs["headers"], {"Content-Type": "audio/wav", "X-Scorer-Secret": "shared"})
+        self.assertEqual((kwargs["content"], kwargs["timeout"]), (b"clip", 45))
+
+    def test_without_a_language_whisper_detects_it(self, post):
+        post.return_value = self.reply(body={"transcript": "hello", "language": "en"})
+        self.assertEqual(transcription.transcribe(b"clip", "audio/wav"), ("hello", "en"))
+        self.assertEqual(post.call_args.kwargs["params"], {})
+
+    def test_failures_become_transcription_errors(self, post):
+        for outcome, message in [
+            (httpx.ReadTimeout("slow"), "timed out after 45s"),
+            (httpx.ConnectError("down"), "request failed: ConnectError"),
+            (self.reply(status=401, body={}), "rejected the secret"),
+            (self.reply(status=422, body={}), "HTTP 422"),
+            (self.reply(body={"nope": 1}), "had no transcript"),
+        ]:
+            with self.subTest(message=message):
+                post.reset_mock(side_effect=True, return_value=True)
+                post.side_effect, post.return_value = (outcome, None) if isinstance(outcome, Exception) else (None, outcome)
+                with self.assertRaisesMessage(TranscriptionError, message):
+                    transcription.transcribe(b"x", "audio/wav", "es")
+
+    @override_settings(SCORER_SECRET="")
+    def test_not_configured_without_the_shared_secret(self, post):
+        self.assertFalse(transcription.is_configured())
+
+
+@override_settings(TRANSCRIBER_URL="http://transcriber:8000/", SCORER_URL="https://scorer.example/", SCORER_SECRET="")
+class BenchNotConfiguredTests(TestCase):
+    def test_a_missing_transcriber_is_an_error_result(self):
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        with override_settings(MEDIA_ROOT=media), mock.patch("core.transcription.model_name", return_value="m"):
+            clip = EvalClip(intended_text="hola", language="es", human_label="good")
+            clip.audio.save("b.wav", ContentFile(b"b"), save=True)
+            self.assertIn("Transcriber not configured", bench.run_bench([clip]).results.get().error)

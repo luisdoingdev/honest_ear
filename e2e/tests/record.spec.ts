@@ -1,55 +1,45 @@
-import { test, expect, Page } from "@playwright/test";
+import { test, expect, Page, Response } from "@playwright/test";
 import { overflow, plainVhRules, watchForErrors } from "./helpers";
 
-const TOKEN_PATH = "/api/transcription/token/";
-const PHONEMES = "o l a e s t o i p ɾ o β a n d o";
+const SOCKET = "**/ws/record/";
+// pcm-worklet.js sends 80 ms of 16 kHz 16-bit mono PCM per message.
+const CHUNK_BYTES = 1280 * 2;
 
-/**
- * Whether the page tries live captions comes from the server (Deepgram key and flags), which differs
- * between a laptop and CI. Each test sets it here so it never depends on .env.
- */
-async function setLiveCaptions(page: Page, on: boolean) {
-  // Set while the page is parsed, before record.js (deferred) reads it, keeping the real request and headers.
-  await page.addInitScript((value) => {
-    new MutationObserver((_, observer) => {
-      const session = document.querySelector<HTMLElement>(".session");
-      if (!session) return;
-      session.dataset.liveCaptions = String(value);
-      observer.disconnect();
-    }).observe(document, { childList: true, subtree: true });
-  }, on);
+// 204 deleted; 200 {"kept": true} while the keep_audio flag (eval mode) is on in the shared dev database.
+// Returns whether the audio was actually deleted.
+async function expectDeletedOrKept(page: Page, deleted: Response) {
+  expect([200, 204]).toContain(deleted.status());
+  if (deleted.status() === 200) expect(await deleted.json()).toEqual({ kept: true });
+  await expect(page.getByRole("status")).toHaveText(deleted.status() === 204 ? /Deleted/ : /Kept for evaluation/);
+  return deleted.status() === 204;
 }
 
-type Turn = { turn: number; event: string; text: string };
-
 /**
- * Stands in for Deepgram Flux's live websocket: hands out a fake token and answers audio with scripted
- * TurnInfo messages. Like the real Flux, closing mid-turn sends nothing more: the last words only
- * arrive if the page sends ForceEndTurn first. Nothing reaches Deepgram.
+ * Passes the page's socket through to the real server (which saves the recording), but replaces the
+ * results it pushes: the e2e server runs without Whisper and the scorer, so on its own they're null.
  */
-async function fakeFlux(page: Page, script: { afterChunk: number; turn: Turn }[], lastTurn: Turn) {
-  const chunkSizes: number[] = [];
-  const controls: string[] = [];
-  await page.route(`**${TOKEN_PATH}`, (route) =>
-    route.fulfill({ json: { url: "wss://api.deepgram.com/v2/listen?fake=1", protocols: ["bearer", "fake-jwt"] } }),
-  );
-  await page.routeWebSocket("wss://api.deepgram.com/**", (ws) => {
-    const send = ({ turn, event, text }: Turn) =>
-      ws.send(JSON.stringify({ type: "TurnInfo", event, turn_index: turn, transcript: text, words: [] }));
-    ws.send(JSON.stringify({ type: "Connected", sequence_id: 0 }));
+async function replaceResults(page: Page, results: Record<string, object>) {
+  const sent = { chunks: [] as number[], texts: [] as string[] };
+  await page.routeWebSocket(SOCKET, (ws) => {
+    const server = ws.connectToServer();
     ws.onMessage((message) => {
-      if (typeof message === "string") {
-        const { type } = JSON.parse(message);
-        controls.push(type);
-        if (type === "ForceEndTurn") send(lastTurn);
-        if (type === "CloseStream") ws.close();
-        return;
-      }
-      chunkSizes.push(message.length);
-      script.filter((step) => step.afterChunk === chunkSizes.length).forEach((step) => send(step.turn));
+      if (typeof message === "string") sent.texts.push(message);
+      else sent.chunks.push(message.length);
+      server.send(message);
     });
+    server.onMessage((message) => {
+      const data = JSON.parse(message as string);
+      ws.send(JSON.stringify({ ...data, ...(results[data.type] ?? {}) }));
+    });
+    server.onClose((code, reason) => ws.close({ code, reason }));
   });
-  return { chunkSizes, controls };
+  return sent;
+}
+
+async function recordFor(page: Page, seconds = 1) {
+  await page.getByRole("button", { name: "Start session" }).click();
+  await expect(page.getByRole("status")).toHaveText(new RegExp(`Listening… 0:0${seconds}`));
+  await page.getByRole("button", { name: "Stop" }).click();
 }
 
 test.describe("home page recorder", () => {
@@ -63,13 +53,7 @@ test.describe("home page recorder", () => {
           value: { getUserMedia: () => Promise.reject(new Error("no microphone in tests")) },
         });
       }
-      if (!("MediaRecorder" in window)) {
-        (window as any).MediaRecorder = class {
-          static isTypeSupported() {
-            return false;
-          }
-        };
-      }
+      if (!("AudioWorkletNode" in window)) (window as any).AudioWorkletNode = class {};
     });
   });
 
@@ -100,7 +84,6 @@ test.describe("home page recorder", () => {
 
     test("shows Spanish", async ({ page }) => {
       const assertNoErrors = watchForErrors(page);
-      await setLiveCaptions(page, false);
       await page.goto("/");
       await expect(page.locator("html")).toHaveAttribute("lang", "es");
       await expect(page.getByRole("button", { name: "Empezar" })).toBeVisible();
@@ -116,117 +99,90 @@ test.describe("home page recorder", () => {
     });
   });
 
-  test("shows live captions while speaking, then the final transcript", async ({ page, browserName }) => {
+  test("streams PCM over the socket and shows each result as the server pushes it", async ({ page, browserName }) => {
     test.skip(browserName !== "chromium", "Playwright can only fake a microphone in Chromium");
     const assertNoErrors = watchForErrors(page);
-    await setLiveCaptions(page, true);
-    const { chunkSizes, controls } = await fakeFlux(
-      page,
-      [
-        // A chunk is 80 ms of audio, so updates arrive about a second apart, as when speaking.
-        { afterChunk: 2, turn: { turn: 0, event: "StartOfTurn", text: "" } },
-        { afterChunk: 4, turn: { turn: 0, event: "Update", text: "Hola" } },
-        { afterChunk: 16, turn: { turn: 0, event: "EndOfTurn", text: "Hola, ¿cómo estás?" } },
-        { afterChunk: 18, turn: { turn: 1, event: "StartOfTurn", text: "" } },
-        { afterChunk: 28, turn: { turn: 1, event: "Update", text: "and a little" } },
-      ],
-      { turn: 1, event: "EndOfTurn", text: "and a little English." },
-    );
-    // The scorer was off or cold: no phonemes, so their line stays hidden.
-    await page.route("**/api/recordings/", async (route) => {
-      const response = await route.fetch();
-      await route.fulfill({ response, json: { ...(await response.json()), phonemes: null } });
+    const alignment = [
+      { word: "hola", ops: [["o", "o"], ["l", "l"], ["a", "a"]].map(([e, h]) => ({ op: "match", expected: e, heard: h })) },
+      {
+        word: "mesa",
+        ops: [
+          { op: "match", expected: "m", heard: "m" },
+          { op: "sub", expected: "e", heard: "i" },
+          { op: "match", expected: "s", heard: "s" },
+          { op: "del", expected: "a", heard: null },
+          { op: "ins", expected: null, heard: "o" },
+        ],
+      },
+    ];
+    const sent = await replaceResults(page, {
+      phonemes: { phonemes: "o l a m i s o" },
+      transcript: { transcript: "Hola mesa" },
+      pairs: { alignment },
     });
     await page.goto("/");
 
-    await page.getByRole("button", { name: "Start session" }).click();
-    const captions = page.locator("#captions");
-    await expect(captions).toHaveText("Hola");
-    await expect(captions).toHaveText("Hola, ¿cómo estás? and a little");
-    await expect(page.locator(".session")).toHaveAttribute("data-phase", "listening");
-    await expect(page.locator(".glow")).toHaveCSS("animation-name", "glow");
+    await recordFor(page);
 
-    const uploadDone = page.waitForRequest((req) => req.url().endsWith("/api/recordings/") && req.method() === "POST");
-    await page.getByRole("button", { name: "Stop" }).click();
-    const upload = await uploadDone;
-    expect(upload.postDataBuffer()?.toString("latin1"), "server is told not to transcribe again").toContain(
-      'name="live_transcript"',
-    );
+    await expect(page.locator("#transcript")).toHaveText("Hola mesa");
+    const words = page.locator(".pair-word");
+    await expect(words).toHaveCount(2);
+    await expect(words.nth(1).locator(".pair-label")).toHaveText("mesa");
+    await expect(words.nth(1).locator(".pair-exp")).toHaveText(["m", "e", "s", "a", "–"]);
+    await expect(words.nth(1).locator(".pair-heard")).toHaveText(["m", "i", "s", "–", "o"]);
+    await expect(words.nth(1).locator(".pair-op:not(.pair-match)")).toHaveCount(3);
+    await expect(page.locator("#phonemes-drift")).toHaveText("3 changes across 7 expected sounds.");
+    await expect(page.locator("#phonemes-text"), "the plain line gives way to the pairs").toBeHidden();
 
-    await expect(page.locator("#transcript")).toHaveText("Hola, ¿cómo estás? and a little English.");
-    await expect(captions).toBeHidden();
-    await expect(page.locator("#phonemes")).toBeHidden();
-    // 80 ms of 16 kHz, 16-bit mono PCM per message: what the server told Flux to expect.
-    expect(chunkSizes.length).toBeGreaterThanOrEqual(28);
-    expect(new Set(chunkSizes)).toEqual(new Set([2560]));
-    expect(controls, "the turn in progress is ended before closing").toEqual(["ForceEndTurn", "CloseStream"]);
-
-    const deleteDone = page.waitForResponse((res) => res.request().method() === "DELETE");
-    await page.getByRole("button", { name: "Play" }).click();
-    expect((await deleteDone).status()).toBe(204);
-    await expect(page.getByRole("status")).toHaveText(/Deleted/);
-    await expect(page.getByRole("button", { name: "Record again" })).toBeVisible();
-    assertNoErrors();
-  });
-
-  test("falls back to transcribing after Stop when live captions can't start", async ({ page, browserName }) => {
-    test.skip(browserName !== "chromium", "Playwright can only fake a microphone in Chromium");
-    const assertNoErrors = watchForErrors(page, { expected: [TOKEN_PATH] });
-    const words = "Esto es una prueba de transcripción. ".repeat(12).trim();
-    await setLiveCaptions(page, true);
-    await page.route(`**${TOKEN_PATH}`, (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }));
-    // Server-side Deepgram can't be faked from here, so stand in its result on the real upload response.
-    await page.route("**/api/recordings/", async (route) => {
-      const response = await route.fetch();
-      await route.fulfill({ response, json: { ...(await response.json()), transcript: words, phonemes: PHONEMES } });
-    });
-    await page.goto("/");
-
-    await page.getByRole("button", { name: "Start session" }).click();
-    await expect(page.getByRole("status")).toHaveText(/Listening… 0:01/);
-    const uploadDone = page.waitForRequest((req) => req.url().endsWith("/api/recordings/") && req.method() === "POST");
-    await page.getByRole("button", { name: "Stop" }).click();
-    expect((await uploadDone).postDataBuffer()?.toString("latin1")).not.toContain('name="live_transcript"');
-
-    await expect(page.locator("#transcript")).toHaveText(words);
-    // What the Modal scorer heard, under the words.
-    await expect(page.locator("#phonemes")).toBeVisible();
-    await expect(page.locator("#phonemes-text")).toHaveText(PHONEMES);
+    // About a second of audio went up as 80 ms PCM chunks, then Stop.
+    expect(sent.chunks.length).toBeGreaterThanOrEqual(10);
+    expect(new Set(sent.chunks)).toEqual(new Set([CHUNK_BYTES]));
+    expect(sent.texts).toEqual([JSON.stringify({ type: "stop" })]);
     const { sideways } = await overflow(page);
     expect(sideways, "page is wider than the screen").toBeLessThanOrEqual(0);
-
-    const deleteDone = page.waitForResponse((res) => res.request().method() === "DELETE");
-    await page.getByRole("button", { name: "Play" }).click();
-    await deleteDone;
-    await expect(page.locator("#transcript"), "transcript stays after playback").toHaveText(words);
     assertNoErrors();
   });
 
   test("records, plays back, then deletes the recording", async ({ page, browserName }) => {
     test.skip(browserName !== "chromium", "Playwright can only fake a microphone in Chromium");
     const assertNoErrors = watchForErrors(page);
-    await setLiveCaptions(page, false);
     await page.goto("/");
-
-    await page.getByRole("button", { name: "Start session" }).click();
-    await expect(page.getByRole("status")).toHaveText(/Listening… 0:01/);
-
-    const uploadDone = page.waitForResponse(
-      (res) => res.url().endsWith("/api/recordings/") && res.request().method() === "POST",
+    const socket = page.waitForEvent("websocket");
+    const saved = new Promise<{ audio_url: string }>((resolve) =>
+      socket.then((ws) =>
+        ws.on("framereceived", ({ payload }) => {
+          const data = JSON.parse(payload as string);
+          if (data.type === "recording") resolve(data);
+        }),
+      ),
     );
-    await page.getByRole("button", { name: "Stop" }).click();
-    const upload = await uploadDone;
-    expect(upload.status()).toBe(201);
-    const { audio_url } = await upload.json();
+
+    await recordFor(page);
+    const { audio_url } = await saved;
+    // Without Whisper and the scorer, the results come back empty and their sections stay hidden.
+    await expect(page.getByRole("button", { name: "Play" })).toBeVisible();
+    await expect(page.locator("#phonemes")).toBeHidden();
+    await expect(page.locator("#transcript")).toBeHidden();
 
     const deleteDone = page.waitForResponse((res) => res.request().method() === "DELETE");
     await page.getByRole("button", { name: "Play" }).click();
-    expect((await deleteDone).status()).toBe(204);
-
-    await expect(page.getByRole("status")).toHaveText(/Deleted/);
+    const gone = await expectDeletedOrKept(page, await deleteDone);
     await expect(page.getByRole("button", { name: "Record again" })).toBeVisible();
-    expect((await page.request.get(audio_url)).status(), "recording should be gone").toBe(404);
+    expect((await page.request.get(audio_url)).status(), "recording should be gone, unless kept").toBe(gone ? 404 : 200);
+    assertNoErrors();
+  });
 
+  test("says why when the server refuses the recording", async ({ page, browserName }) => {
+    test.skip(browserName !== "chromium", "Playwright can only fake a microphone in Chromium");
+    const assertNoErrors = watchForErrors(page);
+    // The server's code for "the recording feature flag is off".
+    await page.routeWebSocket(SOCKET, (ws) => ws.close({ code: 4503 }));
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Start session" }).click();
+
+    await expect(page.getByRole("status")).toHaveText("Recording is turned off right now.");
+    await expect(page.getByRole("button", { name: "Record again" })).toBeEnabled();
     assertNoErrors();
   });
 });

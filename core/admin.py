@@ -13,7 +13,7 @@ from .models import Attempt, EvalClip, EvalResult, EvalRun, FeatureFlag, Recordi
 logger = logging.getLogger(__name__)
 
 # mimetypes would give .weba for audio/webm, which the eval clip's audio validator rejects.
-RECORDING_EXTENSIONS = {"audio/webm": ".webm", "audio/mp4": ".mp4", "audio/ogg": ".ogg"}
+RECORDING_EXTENSIONS = {"audio/wav": ".wav", "audio/webm": ".webm", "audio/mp4": ".mp4", "audio/ogg": ".ogg"}
 
 @admin.register(FeatureFlag)
 class FeatureFlagAdmin(admin.ModelAdmin):
@@ -40,6 +40,28 @@ class RecordingAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+def alignment_html(alignment):
+    """Per word, the expected phonemes above the heard ones, with every mismatch marked."""
+
+    def cell(phoneme):
+        return format_html('<span class="ev-gap">–</span>') if phoneme is None else phoneme
+
+    def ops(word_ops):
+        return format_html_join(
+            "",
+            '<span class="ev-op ev-{}"><span class="ev-exp">{}</span><span class="ev-heard">{}</span></span>',
+            ((op["op"], cell(op["expected"]), cell(op["heard"])) for op in word_ops),
+        )
+
+    words = format_html_join(
+        "",
+        '<div class="ev-word"><div class="ev-word-label">{}</div><div class="ev-ops">{}</div></div>',
+        ((word["word"], ops(word["ops"])) for word in alignment),
+    )
+    legend = format_html('<p class="ev-legend">Top row: expected. Bottom row: heard. Red: substituted, dropped (–) or extra.</p>')
+    return format_html('<div class="ev-words">{}</div>{}', words, legend)
 
 
 @admin.register(Attempt)
@@ -77,7 +99,16 @@ class AttemptAdmin(admin.ModelAdmin):
             )
         if already:
             self.message_user(request, f"{already} attempt(s) skipped: already promoted.", messages.INFO)
-    readonly_fields = [field.name for field in Attempt._meta.fields]
+    readonly_fields = [field.name for field in Attempt._meta.fields] + ["paired_phonemes"]
+
+    class Media:
+        css = {"all": ("core/admin/eval.css",)}
+
+    @admin.display(description="Paired phonemes")
+    def paired_phonemes(self, obj):
+        if not obj.alignment:
+            return "Nothing to pair: no transcript, no phonemes, or a language without an espeak voice."
+        return alignment_html(obj.alignment)
 
     def has_add_permission(self, request):
         return False
@@ -123,24 +154,7 @@ class EvalClipAdmin(admin.ModelAdmin):
             run_link, f"{result.per:.3f}", result.get_predicted_band_display(),
             result.get_human_label_display() or "none",
         )
-        words = format_html_join(
-            "",
-            '<div class="ev-word"><div class="ev-word-label">{}</div><div class="ev-ops">{}</div></div>',
-            ((word["word"], self._ops(word["ops"])) for word in result.alignment),
-        )
-        legend = format_html('<p class="ev-legend">Top row: expected. Bottom row: heard. Red: substituted, dropped (–) or extra.</p>')
-        return format_html('{}<div class="ev-words">{}</div>{}', summary, words, legend)
-
-    @staticmethod
-    def _ops(ops):
-        def cell(phoneme):
-            return format_html('<span class="ev-gap">–</span>') if phoneme is None else phoneme
-
-        return format_html_join(
-            "",
-            '<span class="ev-op ev-{}"><span class="ev-exp">{}</span><span class="ev-heard">{}</span></span>',
-            ((op["op"], cell(op["expected"]), cell(op["heard"])) for op in ops),
-        )
+        return format_html("{}{}", summary, alignment_html(result.alignment))
 
     @admin.action(description="Run bench on the selected clips")
     def run_bench(self, request, queryset):

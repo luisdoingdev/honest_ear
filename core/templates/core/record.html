@@ -15,7 +15,7 @@
   {% endif %}
 </head>
 <body>
-  <main class="session" data-phase="idle"{% if recording_enabled %} data-live-captions="{{ live_captions_enabled|yesno:'true,false' }}" data-worklet="{% static 'core/pcm-worklet.js' %}"{% endif %}>
+  <main class="session" data-phase="idle"{% if recording_enabled %} data-worklet="{% static 'core/pcm-worklet.js' %}"{% endif %}>
     <header class="session-head">
       <div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
       <h1 class="session-title">Honest Ear</h1>
@@ -28,13 +28,15 @@
 
     {% if recording_enabled %}
       <blockquote id="transcript" class="transcript" hidden></blockquote>
-      <p id="phonemes" class="phonemes" hidden>
+      <div id="phonemes" class="phonemes" hidden>
         <span class="phonemes-label">{% translate "Phonemes" %}</span>
+        <p id="phonemes-drift" class="phonemes-drift" hidden></p>
+        <div id="phoneme-pairs" class="phoneme-pairs" lang="und-fonipa" hidden></div>
+        <p id="phonemes-legend" class="phonemes-legend" hidden>{% translate "Top: the sounds the words should have. Bottom: what was heard. Highlighted: changed, missing (–) or extra." %}</p>
         <span id="phonemes-text" class="phonemes-text" lang="und-fonipa"></span>
-      </p>
+      </div>
 
       <div class="session-lower">
-        <p id="captions" class="captions" aria-live="off" hidden></p>
         <div id="spinner" class="spinner" aria-hidden="true" hidden></div>
         <button id="play" class="btn" type="button" hidden>{% translate "Play" %}</button>
       </div>

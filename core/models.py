@@ -39,12 +39,14 @@ class Recording(models.Model):
 class Attempt(models.Model):
     """What was heard in one recording, kept as text after the audio itself is deleted.
 
-    The Deepgram transcript and the Modal phonemes sit side by side; pronunciation scoring will compare them.
+    Whisper's transcript and wav2vec2's phonemes sit side by side, paired word by word in `alignment`.
     """
 
     class TranscriptSource(models.TextChoices):
-        LIVE = "live", "Live captions (Deepgram Flux)"
-        DEEPGRAM = "deepgram", "After Stop (Deepgram nova-3)"
+        LOCAL = "local", "Whisper"
+        # Older attempts, from before the websocket pipeline.
+        LIVE = "live", "Live captions (Deepgram Flux, legacy)"
+        DEEPGRAM = "deepgram", "Deepgram nova-3 (legacy)"
         NONE = "none", "Not transcribed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -62,6 +64,10 @@ class Attempt(models.Model):
     phoneme_inference_ms = models.FloatField(null=True, blank=True)
     audio_duration_s = models.FloatField(null=True, blank=True)
     scorer_error = models.CharField(max_length=300, blank=True)
+    # The transcript's espeak phonemes aligned against the heard ones, by word (core.pronunciation.align).
+    # Empty when either side is missing or the language has no espeak voice here.
+    alignment = models.JSONField(default=list, blank=True)
+    alignment_language = models.CharField(max_length=2, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -93,7 +99,7 @@ class EvalClip(models.Model):
     )
     intended_text = models.TextField(
         blank=True,
-        help_text="What the speaker meant to say, typed by a human. Never copy it from Deepgram's transcript.",
+        help_text="What the speaker meant to say, typed by a human. Never copy it from the transcript.",
     )
     language = models.CharField(
         max_length=2, choices=Language.choices, default=Language.SPANISH,

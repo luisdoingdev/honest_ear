@@ -1,9 +1,10 @@
 (() => {
   const MAX_SECONDS = 60;
-  const CAPTION_WORDS = 8;
-  // After Stop, Deepgram finalizes the last words; don't wait longer than this for them.
-  const FINALIZE_TIMEOUT_MS = 2000;
-  const MIME_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+  // Close codes from core.consumers.
+  const CLOSE_MESSAGES = {
+    4503: () => gettext("Recording is turned off right now."),
+    4413: () => gettext("Recording is too long."),
+  };
 
   const $ = (id) => document.getElementById(id);
   const session = document.querySelector(".session");
@@ -12,21 +13,22 @@
     transcript: $("transcript"),
     phonemes: $("phonemes"),
     phonemesText: $("phonemes-text"),
-    captions: $("captions"),
+    phonemesDrift: $("phonemes-drift"),
+    phonemePairs: $("phoneme-pairs"),
+    phonemesLegend: $("phonemes-legend"),
     spinner: $("spinner"),
     play: $("play"),
     mic: $("mic"),
   };
   const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
-  const liveCaptionsEnabled = session.dataset.liveCaptions === "true";
+  const socketUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/record/`;
   const audio = new Audio();
 
   let phase = "idle";
   let stream = null;
-  let recorder = null;
-  let chunks = [];
   let recording = null;
-  let live = null;
+  // The current recording's socket, microphone graph and results; replaced on every new recording.
+  let take = null;
   let clockId = null;
 
   // idle → listening → transcribing → revealed → playing → played (then listening again).
@@ -36,7 +38,6 @@
     const labels = { idle: gettext("Start session"), listening: gettext("Stop") };
     els.mic.setAttribute("aria-label", labels[next] ?? gettext("Record again"));
     els.mic.disabled = next === "transcribing" || next === "playing";
-    els.captions.hidden = next !== "listening";
     els.spinner.hidden = next !== "transcribing";
     els.play.hidden = next !== "revealed";
   }
@@ -62,10 +63,52 @@
   }
 
   // transcript is null when transcription is off or failed (then error explains why).
-  // null when the scorer is off, cold or down: the line stays hidden.
-  function showPhonemes(phonemes) {
-    els.phonemesText.textContent = phonemes || "";
+  // phonemes is null when the scorer is off, cold or down: the section stays hidden.
+  // alignment (from the server) pairs each word's expected phonemes with the heard ones; without it,
+  // the heard phonemes are shown as one plain line.
+  function showPhonemes(phonemes, alignment) {
+    const paired = Boolean(phonemes && alignment && alignment.length);
     els.phonemes.hidden = !phonemes;
+    els.phonemesText.hidden = paired;
+    els.phonemesText.textContent = paired ? "" : phonemes || "";
+    els.phonemePairs.hidden = !paired;
+    els.phonemesLegend.hidden = !paired;
+    els.phonemesDrift.hidden = !paired;
+    els.phonemePairs.replaceChildren(...(paired ? alignment.map(pairedWord) : []));
+    if (paired) els.phonemesDrift.textContent = driftSummary(alignment);
+  }
+
+  function pairedWord({ word, ops }) {
+    const column = document.createElement("div");
+    column.className = "pair-word";
+    const label = document.createElement("span");
+    label.className = "pair-label";
+    label.textContent = word;
+    label.lang = document.documentElement.lang;
+    const row = document.createElement("span");
+    row.className = "pair-ops";
+    for (const op of ops) {
+      const cell = document.createElement("span");
+      cell.className = `pair-op pair-${op.op}`;
+      cell.dataset.op = op.op;
+      for (const [side, phoneme] of [["exp", op.expected], ["heard", op.heard]]) {
+        const part = document.createElement("span");
+        part.className = `pair-${side}`;
+        part.textContent = phoneme ?? "–";
+        cell.append(part);
+      }
+      row.append(cell);
+    }
+    column.append(label, row);
+    return column;
+  }
+
+  function driftSummary(alignment) {
+    const ops = alignment.flatMap((w) => w.ops);
+    const expected = ops.filter((op) => op.op !== "ins").length;
+    const drifted = ops.filter((op) => op.op !== "match").length;
+    if (!drifted) return gettext("Every sound matched.");
+    return interpolate(gettext("%s changes across %s expected sounds."), [drifted, expected]);
   }
 
   function showTranscript(transcript, error) {
@@ -85,83 +128,95 @@
     els.transcript.hidden = !els.transcript.textContent;
   }
 
-  function showCaptions(words) {
-    els.captions.textContent = words.slice(-CAPTION_WORDS).join(" ");
+  // One socket per recording (core.consumers): PCM goes up while listening, then {"type": "stop"}.
+  // The server pushes the saved recording, then the phonemes and the transcript as each is ready, then the
+  // pairs. Messages from an earlier recording's socket are ignored.
+  function openSocket(current) {
+    const socket = new WebSocket(socketUrl);
+    socket.binaryType = "arraybuffer";
+    const pending = [];
+    current.send = (data) => {
+      if (socket.readyState === WebSocket.OPEN) socket.send(data);
+      else if (socket.readyState === WebSocket.CONNECTING) pending.push(data);
+    };
+    socket.addEventListener("open", () => pending.splice(0).forEach((data) => socket.send(data)));
+    socket.addEventListener("message", (event) => take === current && handle(current, JSON.parse(event.data)));
+    socket.addEventListener("close", (event) => take === current && closed(current, event));
+    current.socket = socket;
   }
 
-  async function errorMessage(response) {
+  async function handle(current, message) {
+    switch (message.type) {
+      case "recording":
+        await received(current, message);
+        break;
+      case "phonemes":
+        current.phonemes = message.phonemes;
+        showPhonemes(message.phonemes, []);
+        break;
+      case "transcript":
+        showTranscript(message.transcript ?? null, message.error);
+        break;
+      case "pairs":
+        showPhonemes(current.phonemes, message.alignment);
+        break;
+      case "error":
+        current.failed = true;
+        fail(message.error);
+        break;
+    }
+  }
+
+  async function received(current, message) {
+    recording = { id: message.id };
+    // Results keep arriving while the audio downloads; the transcript fills in when Whisper is done.
+    showTranscript(undefined, gettext("Transcribing…"));
     try {
-      return (await response.json()).error;
-    } catch {
-      return `HTTP ${response.status}`;
+      // Download now so the Play tap can start playback immediately (iOS requires that).
+      const downloaded = await fetch(message.audio_url, { cache: "no-store" });
+      if (!downloaded.ok) throw new Error(`HTTP ${downloaded.status}`);
+      if (audio.src) URL.revokeObjectURL(audio.src);
+      audio.src = URL.createObjectURL(await downloaded.blob());
+    } catch (err) {
+      fail(interpolate(gettext("Couldn't load the recording: %s"), [err.message]));
+      return;
     }
+    if (take !== current) return;
+    current.saved = true;
+    setStatus(gettext("Tap Play to hear it. It's deleted when it finishes."));
+    setPhase("revealed");
   }
 
-  // Live captions: the server hands out a short-lived Deepgram token, the browser streams PCM to Flux.
-  // Flux is turn-based: every TurnInfo carries the whole transcript of one turn so far, so each turn's
-  // text is replaced in place rather than appended. Any failure leaves state.ok false, and the server
-  // transcribes the upload after Stop instead.
-  async function startLive(audioContext) {
-    const state = { ok: false, turns: [], text: "", socket: null, source: null, closed: null };
-    if (!liveCaptionsEnabled) return state;
-    try {
-      const [tokenResponse] = await Promise.all([
-        fetch("/api/transcription/token/", { method: "POST", headers: { "X-CSRFToken": csrfToken } }),
-        audioContext.audioWorklet.addModule(session.dataset.worklet),
-      ]);
-      if (!tokenResponse.ok || phase !== "listening") return state;
-      const { url, protocols } = await tokenResponse.json();
-
-      const socket = new WebSocket(url, protocols);
-      const pending = [];
-      state.socket = socket;
-      state.closed = new Promise((resolve) => socket.addEventListener("close", resolve));
-      socket.addEventListener("open", () => {
-        state.ok = true;
-        pending.splice(0).forEach((chunk) => socket.send(chunk));
-      });
-      socket.addEventListener("error", () => (state.ok = false));
-      socket.addEventListener("message", (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === "Error") state.ok = false;
-        if (data.type !== "TurnInfo") return;
-        state.turns[data.turn_index] = data.transcript;
-        state.text = state.turns.filter(Boolean).join(" ");
-        showCaptions(state.text.split(/\s+/));
-      });
-
-      const node = new AudioWorkletNode(audioContext, "pcm16-downsampler");
-      node.port.onmessage = ({ data }) => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(data);
-        else if (socket.readyState === WebSocket.CONNECTING) pending.push(data);
-      };
-      state.source = audioContext.createMediaStreamSource(stream);
-      // A silent output keeps the worklet running in browsers that skip nodes with no destination.
-      const mute = audioContext.createGain();
-      mute.gain.value = 0;
-      state.source.connect(node).connect(mute).connect(audioContext.destination);
-    } catch {
-      state.ok = false;
-    }
-    return state;
+  function closed(current, event) {
+    if (current.failed || current.saved || event.code === 1000) return;
+    // Closed before the recording was saved: say why, and leave the mic ready for another try.
+    current.failed = true;
+    stopMicrophone(current);
+    const message = CLOSE_MESSAGES[event.code]?.() ?? gettext("The connection was lost. Try again.");
+    fail(message);
   }
 
-  async function finishLive(state, audioContext) {
-    state.source?.disconnect();
-    audioContext.close().catch(() => {});
-    const { socket } = state;
-    if (socket?.readyState === WebSocket.OPEN) {
-      // Closing alone drops the turn still in progress; ForceEndTurn makes Flux send its final EndOfTurn first.
-      socket.send(JSON.stringify({ type: "ForceEndTurn" }));
-      socket.send(JSON.stringify({ type: "CloseStream" }));
-      const timeout = new Promise((resolve) => setTimeout(resolve, FINALIZE_TIMEOUT_MS));
-      await Promise.race([state.closed, timeout]);
-      socket.close();
-    } else {
-      socket?.close();
-      state.ok = false;
-    }
-    return state.ok ? state.text : null;
+  function fail(message) {
+    clearInterval(clockId);
+    setStatus(message, true);
+    setPhase("played");
+  }
+
+  async function startMicrophone(current, audioContext) {
+    current.audioContext = audioContext;
+    await audioContext.audioWorklet.addModule(session.dataset.worklet);
+    const node = new AudioWorkletNode(audioContext, "pcm16-downsampler");
+    node.port.onmessage = ({ data }) => current.send(data);
+    current.source = audioContext.createMediaStreamSource(stream);
+    // A silent output keeps the worklet running in browsers that skip nodes with no destination.
+    const mute = audioContext.createGain();
+    mute.gain.value = 0;
+    current.source.connect(node).connect(mute).connect(audioContext.destination);
+  }
+
+  function stopMicrophone(current) {
+    current.source?.disconnect();
+    current.audioContext?.close().catch(() => {});
   }
 
   async function deleteRecording() {
@@ -186,66 +241,32 @@
       return;
     }
 
-    const mimeType = MIME_TYPES.find((t) => MediaRecorder.isTypeSupported(t));
-    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    chunks = [];
-    recorder.addEventListener("dataavailable", (e) => e.data.size && chunks.push(e.data));
-    const stopped = new Promise((resolve) => recorder.addEventListener("stop", resolve));
-    recorder.start();
-
+    take?.socket?.close();
+    const current = { phonemes: null };
+    take = current;
+    openSocket(current);
     els.transcript.hidden = true;
     els.phonemes.hidden = true;
-    showCaptions([]);
     setPhase("listening");
     startClock();
-
-    const liveStarted = startLive(audioContext);
-    live = { audioContext, stopped, liveStarted };
+    try {
+      await startMicrophone(current, audioContext);
+    } catch {
+      // The socket may already have failed (and said why) while the microphone was starting.
+      if (current.failed || take !== current) return;
+      current.failed = true;
+      current.socket.close();
+      fail(gettext("This browser can't record audio. Try a recent Chrome or Safari."));
+    }
   }
 
-  async function stopListening() {
+  function stopListening() {
     if (phase !== "listening") return;
     clearInterval(clockId);
     setPhase("transcribing");
-    setStatus(gettext("Transcribing…"));
-    if (recorder.state === "recording") recorder.stop();
-
-    const { audioContext, stopped, liveStarted } = live;
-    const [, liveText] = await Promise.all([stopped, liveStarted.then((s) => finishLive(s, audioContext))]);
-    await upload(liveText);
-  }
-
-  async function upload(liveText) {
-    const type = recorder.mimeType || chunks[0]?.type || "audio/webm";
-    const form = new FormData();
-    form.append("audio", new Blob(chunks, { type }), "recording");
-    if (liveText !== null) form.append("live_transcript", liveText);
-
-    try {
-      const created = await fetch("/api/recordings/", {
-        method: "POST",
-        body: form,
-        headers: { "X-CSRFToken": csrfToken },
-      });
-      if (!created.ok) throw new Error(await errorMessage(created));
-      recording = await created.json();
-
-      // Download now so the Play tap can start playback immediately (iOS requires that).
-      const downloaded = await fetch(recording.audio_url, { cache: "no-store" });
-      if (!downloaded.ok) throw new Error(await errorMessage(downloaded));
-      if (audio.src) URL.revokeObjectURL(audio.src);
-      audio.src = URL.createObjectURL(await downloaded.blob());
-
-      if (liveText !== null) showTranscript(liveText);
-      else showTranscript(recording.transcript ?? null, recording.transcript_error);
-      showPhonemes(recording.phonemes ?? null);
-      setStatus(gettext("Tap Play to hear it. It's deleted when it finishes."));
-      setPhase("revealed");
-    } catch (err) {
-      await deleteRecording();
-      setStatus(interpolate(gettext("Upload failed: %s"), [err.message]), true);
-      setPhase("played");
-    }
+    setStatus(gettext("Saving…"));
+    stopMicrophone(take);
+    take.send(JSON.stringify({ type: "stop" }));
   }
 
   if (!window.isSecureContext) {
@@ -254,7 +275,7 @@
     return;
   }
 
-  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder || !window.AudioContext) {
+  if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode || !window.WebSocket) {
     setStatus(gettext("This browser can't record audio. Try a recent Chrome or Safari."), true);
     els.mic.disabled = true;
     return;

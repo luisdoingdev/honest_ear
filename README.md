@@ -4,11 +4,12 @@
 
 ## Stack
 
-- Django 5.2
+- Django 5.2, served as ASGI by Daphne (Django Channels for the recording websocket)
 - PostgreSQL 17
 - Redis 7 (cache and Celery broker)
 - Celery worker and Celery Beat
 - Docker Compose
+- Whisper (faster-whisper) and wav2vec2 in their own containers, for transcripts and phonemes
 
 ## Getting started
 
@@ -32,12 +33,15 @@ The site is at http://localhost:8000. On startup the web container runs migratio
 
 | Service       | Purpose                  | Port |
 | ------------- | ------------------------ | ---- |
-| `web`         | Django development server | 8000 |
+| `web`         | Django (Daphne `runserver`): pages, admin and `/ws/record/` | 8000 |
 | `celery`      | Background task worker   | –    |
 | `celery-beat` | Scheduled tasks          | –    |
 | `db`          | PostgreSQL               | 5433 on the Mac (`POSTGRES_PORT`), `db:5432` inside Docker |
 | `redis`       | Cache and message broker | 6380 on the Mac (`REDIS_PORT`), `redis:6379` inside Docker |
-| `scorer`      | Local phoneme service (opt-in, profile `scorer`) | 8011 on the Mac (`SCORER_PORT`), `scorer:8000` inside Docker |
+| `scorer`      | Local phoneme service (wav2vec2, CPU) | 8011 on the Mac (`SCORER_PORT`), `scorer:8000` inside Docker |
+| `transcriber` | Local speech-to-text (Whisper, CPU) | 8012 on the Mac (`TRANSCRIBER_PORT`), `transcriber:8000` inside Docker |
+
+`.env.example` points Django at the `transcriber` and `scorer` containers. No recording goes to an outside service.
 
 ## Useful commands
 
@@ -58,35 +62,34 @@ The home page, http://localhost:8000/, lets anyone record their voice, play it b
 
 There's one mic button, following the "Honest Ear Voice Prototype" design:
 
-1. **Tap the mic** (the first time, the browser asks for microphone access). It moves to the bottom of the screen and a glow rises while it listens. The status counts up, and **live captions** show the last few words as you speak. Recording stops on its own at 60 seconds.
-2. **Tap it again** to stop. A spinner shows while the audio is uploaded to `POST /api/recordings/` and stored in Postgres (5 MB max; webm, mp4 or ogg).
-3. The full transcript fades in, then **Play** appears. Playback comes from the server. When it ends, the page calls `DELETE /api/recordings/<id>/`, and the transcript stays on screen. Tapping the mic again starts a new recording and deletes any unplayed one.
+1. **Tap the mic** (the first time, the browser asks for microphone access). It moves to the bottom of the screen and a glow rises while it listens, and the status counts up. Recording stops on its own at 60 seconds.
+2. **Tap it again** to stop. The server saves the recording right away, so **Play** appears within a moment.
+3. The results fill in as each is ready: the phonemes after a few seconds, then the transcript, then the words paired with their phonemes. Playback comes from the server. When it ends, the page calls `DELETE /api/recordings/<id>/`, and the results stay on screen. Tapping the mic again starts a new recording and deletes any unplayed one.
 
-### Transcription
+### The recording websocket
 
-Set `DEEPGRAM_API_KEY` in `.env` (and in Render) to turn it on; without it, recording works and no text is shown. The admin's `transcription` feature flag switches it off without removing the key.
+There's no upload. Each recording has its own websocket, `/ws/record/`, handled by `core/consumers.py` (Django Channels on Daphne):
 
-- The upload response includes `transcript`. It's text, `""` when no speech was heard, or `null` when transcription is off or failed. On failure there's also `transcript_error`, which the page shows. The recording is kept either way.
-- Recordings are sent with Deepgram's `mip_opt_out=true`, so they're excluded from Deepgram's model-improvement program. Transcripts are saved as text on an **Attempt** (see [Pronunciation scorer](#pronunciation-scorer-modal)) after the audio is deleted, and the logs record only their length, never the words.
-- `language=multi` transcribes Spanish, English, or both mixed in one sentence, whatever the browser's language. The browser language only picks the language of the page and its messages.
-- If live captions didn't run, the server sends the uploaded file to Deepgram's pre-recorded API after Stop and returns the text with the upload. Streaming-only options (`interim_results`, `endpointing`) don't work on that endpoint: Deepgram rejects them with HTTP 400, and the log shows its reason.
+```
+page ──16 kHz PCM (80 ms chunks)──▶ /ws/record/ ──WAV──▶ scorer (wav2vec2)   ─┐
+page ──{"type": "stop"}──────────▶              ──WAV──▶ transcriber (Whisper) ├─▶ Attempt
+page ◀── recording · phonemes · transcript · pairs (each as soon as it's ready) ┘
+```
 
-### Live captions
+1. `pcm-worklet.js` turns the microphone into 16 kHz 16-bit mono PCM and sends it in 80 ms chunks. Raw PCM streams the same way on every browser, including iPhones. The server keeps it in memory: at most 75 seconds of audio, after which it hangs up (close code `4413`).
+2. On Stop, the page sends `{"type": "stop"}`. The server wraps the audio as a WAV, saves it as a **Recording** and pushes `{"type": "recording", "id", "audio_url"}`, so Play works before any result is in.
+3. The scorer and the transcriber run **at the same time**, and each result is pushed as soon as it's ready:
+   - `{"type": "phonemes", "phonemes"}` from wav2vec2. On CPU that's about 3 seconds for a short sentence.
+   - `{"type": "transcript", "transcript"}` from Whisper, which detects Spanish or English itself. It takes about 13 seconds for the same sentence.
+   - `{"type": "pairs", "attempt_id", "alignment"}`: the transcript's expected phonemes (espeak) aligned with the heard ones, word by word. Then the server closes the socket normally.
+4. Everything is saved as an **Attempt** (see [Pronunciation scorer](#pronunciation-scorer-modal)).
 
-While you speak, the browser streams the microphone straight to **Deepgram Flux**, Deepgram's turn-based live model, and Django stays a plain WSGI app (no ASGI or websockets on the server):
+The page shows each word over its phonemes: expected on top, heard below. Changed, missing (`–`) or extra phonemes are highlighted, with a count of the changes. This shows drift against what was *said* (the transcript), not a score against an intended sentence. Only Spanish and English have espeak voices here, so a clip Whisper detects as another language gets no pairs.
 
-1. On the first tap, the page calls `POST /api/transcription/token/`. Django uses the real API key to get a 30-second token from Deepgram's `/v1/auth/grant`, and returns it with a websocket URL whose options it picked: `wss://api.deepgram.com/v2/listen` (Flux only answers on v2), `model=flux-general-multi` with `language_hint=es` and `language_hint=en` (Spanish, English or a mix), and `mip_opt_out`. v1 options such as `interim_results`, `endpointing` or `smart_format` don't apply to Flux. The API key never reaches the browser, and the token only needs to be valid while the socket opens.
-2. `pcm-worklet.js` turns the microphone into 16 kHz 16-bit PCM in 80 ms chunks, the size Deepgram recommends for Flux. Raw PCM streams the same way on every browser, while the MP4 that iPhones record can't be streamed. MediaRecorder still records the file for playback alongside it.
-3. Flux reports **turns**. Each `TurnInfo` message (`StartOfTurn`, `Update`, `EndOfTurn`, …) carries the whole transcript of one turn so far and its `turn_index`, so the page replaces that turn's text in place. Captions show the last words across turns, and the transcript is all turns joined.
-4. On Stop the page sends `ForceEndTurn`, then `CloseStream`. Closing alone would lose the turn still in progress, because Flux only sends a turn's final text when it ends. The page waits up to 2 seconds for that last `EndOfTurn`, then uploads with `live_transcript=1`, so the server doesn't pay Deepgram a second time.
-
-If anything fails (the `live_captions` flag is off, no token, a socket error), recording works as before and the server transcribes after Stop.
-
-- **The key needs Member permissions** in the Deepgram console; with the default role, `/v1/auth/grant` returns 403 and live captions stay off.
-- Each IP can get 10 tokens a minute. The counter lives in Redis, and if Redis is down no tokens are issued. The IP is the last `X-Forwarded-For` entry, the one Render's proxy adds, because earlier entries can be forged.
-- Logs record when a token is issued or refused, never the token itself.
-- Deepgram's call has a 20-second timeout, which keeps it under gunicorn's 30-second request limit. `DEEPGRAM_MODEL` overrides the after-Stop model (`nova-3`) and `DEEPGRAM_STREAMING_MODEL` the live one (`flux-general-multi`).
-- Tests never call Deepgram. The Django tests replace it with fake replies, and run without the `.env` key so a real key can't make them call it. Playwright fakes the token endpoint and Flux's websocket (`page.routeWebSocket`), checks the audio arrives as 80 ms PCM chunks and that Stop sends `ForceEndTurn` before `CloseStream`, and covers the fall-back path.
+- **Failures never lose the other result.** If Whisper or the scorer fails or is off, its message carries `null` (the transcript also gets an `error`), the reason is stored on the Attempt and logged, and the rest still arrives. Without either service, recording and playback still work.
+- **Refusals** come as a close code the page explains: `4503` when the `recording` flag is off, `4413` when the audio is too long. Only pages served from `ALLOWED_HOSTS` can open the socket.
+- **Leaving before Stop** discards the audio. Leaving after Stop doesn't stop the analysis: the Attempt is still saved.
+- **Privacy:** the logs record lengths and timings, never the words or the phonemes. The audio is deleted after playback unless the `keep_audio` flag (eval mode) is on.
 
 As a safety net, Celery Beat runs `delete_stale_recordings` every minute and removes anything older than 10 minutes, such as recordings from a tab that was closed before playing.
 
@@ -137,9 +140,9 @@ Set these in `.env` locally, then `docker compose up -d --force-recreate web`, a
 | `SCORER_SECRET` | The same value as the Modal secret `honest-ear-scorer`. |
 | `SCORER_TIMEOUT_SECONDS` | Optional; defaults to 10. |
 
-On every upload, `core/views.py` sends the clip to the scorer and, when live captions didn't already provide the words, to Deepgram, both at once. Both results are saved together as an **Attempt**, visible in the admin under **Core → Attempts**: the transcript and where it came from (live or after Stop), the phonemes, the inference time and the audio duration. The audio is still deleted after playback, and the Attempt keeps only the text.
+After every recording, the websocket sends the WAV to the scorer and to Whisper at once. Both results are saved together as an **Attempt**, visible in the admin under **Core → Attempts**: the transcript, the phonemes, the inference time, the audio duration, and the word-by-word pairs (as JSON and drawn per word). The audio is still deleted after playback, and the Attempt keeps only the text.
 
-- **Cold starts:** a cold container (starting up, loading the model) usually takes longer than the 10-second timeout, so the first request after a pause gets no phonemes. The upload still succeeds, the transcript is still saved, and the reason is logged and stored on the Attempt (`Scorer timed out after 10s (cold start?)`). Later requests hit the warm container.
+- **Cold starts:** a cold Modal container (starting up, loading the model) usually takes longer than the 10-second timeout, so the first request after a pause gets no phonemes. The recording still works, the transcript is still saved, and the reason is logged and stored on the Attempt (`Scorer timed out after 10s (cold start?)`). Later requests hit the warm container. The local container has no cold starts.
 - **Cost:** the T4 is billed only while a container is up, which is any request plus 5 minutes.
 - **Logs:** they record the phonemes' length, inference time and duration, never the phonemes or the words. The secret is never logged or sent anywhere but the scorer.
 
@@ -147,19 +150,11 @@ On every upload, `core/views.py` sends the clip to the scorer and, when live cap
 
 The same model also runs in a local container, with no Modal, GPU or cold-start timeout. `scorer/local.py` answers exactly like the Modal endpoint: the same `POST`, the same `X-Scorer-Secret` header and the same JSON. Both use `scorer/engine.py`, so they decode and recognize identically, and Django can use either just by changing `SCORER_URL`.
 
-```bash
-docker compose --profile scorer up -d --build scorer
-```
+It's part of the local stack, so `./dev.sh` builds and starts it (CI starts only `web` and doesn't build its 1.6 GB image).
 
-- **It's opt-in** (Compose profile `scorer`), so `./dev.sh` and CI don't build its 1.6 GB image.
 - **The first start downloads the 1.2 GB of weights** into the `scorer_hf_cache` volume, then loads them. Later starts only load them. The container reports healthy once the model is ready.
 - It reads `SCORER_SECRET` from `.env`, the same value Django sends.
-- **To point Django at it**, set these in `.env`, then run `docker compose up -d --force-recreate web`:
-  ```
-  SCORER_URL=http://scorer:8000/
-  SCORER_TIMEOUT_SECONDS=30
-  ```
-  CPU inference is slower than the T4, so give it a longer timeout. To go back to Modal, put its URL back.
+- **Django uses it locally** through `SCORER_URL=http://scorer:8000/` and `SCORER_TIMEOUT_SECONDS=30` (both in `.env.example`). CPU inference is slower than the T4, hence the longer timeout. Modal's URL belongs only in Render.
 - **Trying it from the Mac:** `curl -X POST localhost:8011/ -H "X-Scorer-Secret: $SCORER_SECRET" --data-binary @clip.webm`. If 8011 is taken, set `SCORER_PORT`. `GET localhost:8011/health` shows the model and device.
 - **Memory:** the model needs about 2 GB, and the container is capped at 2.5 GB so it can't starve Postgres. If Docker's VM is small (Rancher Desktop → Preferences → Virtual Machine), either give it more memory or set `SCORER_QUANTIZE=1` in `.env`. That stores the weights as int8, about a quarter of the memory and faster, but the phonemes can differ slightly from Modal's.
 
@@ -169,7 +164,7 @@ One question: **does the pronunciation score agree with human judgement, and how
 
 ### 1. Golden set (Eval clips)
 
-Each clip has its audio, the **intended text** (typed by a human, never copied from Deepgram), its language, a **human label** (good, okay or off, by ear) and notes.
+Each clip has its audio, the **intended text** (typed by a human, never copied from the transcript), its language, a **human label** (good, okay or off, by ear) and notes.
 
 - **Upload** a clip on the Eval clips page.
 - **Or promote a real recording:** turn on the `keep_audio` feature flag (off by default) and record on the site. While the flag is on, the audio isn't deleted after playback, and the page says "Kept for evaluation". Then, in **Attempts**, select attempts and choose **Promote to EvalClip**. That copies the audio and links the attempt, leaving the intended text and label for you to fill in. Turn `keep_audio` off again when you're done; visitors are promised their audio is deleted.
@@ -177,14 +172,14 @@ Each clip has its audio, the **intended text** (typed by a human, never copied f
 ### 2. Scoring (`core/pronunciation.py`, configured in `core/eval_config/scoring.json`)
 
 1. **Too short:** clips under `min_duration_s` (1.5 s) are not scored.
-2. **Wrong sentence:** if fewer than `wrong_sentence_min_overlap` (50%) of the intended words appear in Deepgram's transcript, the clip is marked `wrong_sentence` and not scored.
+2. **Wrong sentence:** if fewer than `wrong_sentence_min_overlap` (50%) of the intended words appear in Whisper's transcript, the clip is marked `wrong_sentence` and not scored.
 3. **Expected phonemes:** the intended text, word by word, through espeak-ng (`es-419` or `en-us`). espeak is the phonemizer this model's training labels came from, so both sides use the same IPA symbols.
 4. **Alignment:** Levenshtein with backtrace, one op per phoneme (match, sub, ins or del), grouped by word. Among equally cheap alignments it picks the one with the most matches.
 5. **PER** = (sub + ins + del) / expected phonemes, then a band: `good` up to `bands.good`, `okay` up to `bands.okay`, `off` above. The thresholds live only in the JSON config. Bump its `version` whenever you change a value: every run stores the config it used.
 
 ### 3. Runs and the report
 
-- Select clips in **Eval clips** and choose **Run bench on the selected clips**. That creates an **Eval run**: each clip goes through the real pipeline, Deepgram and the phoneme scorer at once, and gets an **Eval result** with status, PER, predicted band, alignment and the human label as it was at run time. If a service fails, that clip's status is `error` and the reason is saved.
+- Select clips in **Eval clips** and choose **Run bench on the selected clips**. That creates an **Eval run**: each clip goes through the real pipeline, Whisper and the phoneme scorer at once, and gets an **Eval result** with status, PER, predicted band, alignment and the human label as it was at run time. If a service fails, that clip's status is `error` and the reason is saved.
 - Each clip's page shows its **latest run**: expected phonemes above heard, per word, with mismatches in red.
 - Each run has a **Report** (linked from the Eval runs list):
   - agreement % and Spearman correlation between PER and label (good < okay < off; near +1 means higher PER where you heard worse),
@@ -193,11 +188,19 @@ Each clip has its audio, the **intended text** (typed by a human, never copied f
   - the most common substitutions.
 - `docker compose exec web python manage.py write_eval_summary` writes the latest run's summary into the **Evals** section at the end of this README.
 
-The scorer used is whatever `SCORER_URL` points at. For the bench, the local container (`http://scorer:8000/`, `SCORER_TIMEOUT_SECONDS=30`) avoids Modal's cold starts. Uploaded clips are stored in `media/eval_clips/` (gitignored) and played only with `DEBUG` on, so the bench is meant for local use.
+#### The transcriber (Whisper)
+
+The `transcriber` container gives the recordings and the bench's wrong-sentence gate their transcripts, with no API key, no cost and the same output every time. `./dev.sh` starts it, and `TRANSCRIBER_URL=http://transcriber:8000/` in `.env` points Django at it. With `TRANSCRIBER_URL` empty, recordings aren't transcribed.
+
+- **What it runs:** `scorer/transcriber.py` runs Whisper `medium` with int8 weights on CPU (`TRANSCRIBER_MODEL` picks another size, such as `small` or `large-v3-turbo`). It uses the same `X-Scorer-Secret` as the phoneme scorer. The bench sends each clip's language; recordings send none and Whisper detects it.
+- **First start:** it downloads the weights (about 1.5 GB) into the `transcriber_hf_cache` volume. The image is about 500 MB, since it has no PyTorch.
+- **Runs say which transcriber they used** (`config.transcriber`, for example `local: faster-whisper-medium-int8`; runs 1 and 2 used Deepgram's `nova-3`). A different transcriber passes or gates different clips, so compare runs that used the same one.
+
+The scorer is whatever `SCORER_URL` points at: locally the `scorer` container, which has no cold starts. Uploaded clips are stored in `media/eval_clips/` (gitignored) and played only with `DEBUG` on, so the bench is meant for local use.
 
 ## Deploying (Render + Supabase)
 
-The web service on Render builds from the `Dockerfile`. On every start, `start.sh` runs migrations, creates the admin user from `DJANGO_SUPERUSER_*` if it doesn't exist yet, then starts gunicorn on Render's `PORT`. If `DATABASE_URL` still points at the local Docker host, or the database can't be reached, the container exits with an error and Render marks the deploy as failed.
+The web service on Render builds from the `Dockerfile`. On every start, `start.sh` runs migrations, creates the admin user from `DJANGO_SUPERUSER_*` if it doesn't exist yet, then starts Daphne (HTTP and the recording websocket) on Render's `PORT`. Render web services support websockets on every plan. If `DATABASE_URL` still points at the local Docker host, or the database can't be reached, the container exits with an error and Render marks the deploy as failed.
 
 The service is described in [`render.yaml`](render.yaml), a Render Blueprint. It lists every environment variable by name, and it never holds a secret value:
 
@@ -207,8 +210,8 @@ The service is described in [`render.yaml`](render.yaml), a Render Blueprint. It
 | `DATABASE_URL` | You enter it in Render (`sync: false`). Use the Supabase **Session pooler** URL (port 5432) with `?sslmode=require` on the end. Render is IPv4-only, so the direct connection won't work. URL-encode special characters in the password. |
 | `REDIS_URL` | Set automatically: `render.yaml` creates a free Key Value (Redis) instance, `honest-ear-redis`, reachable only from your Render services. |
 | `DJANGO_SUPERUSER_EMAIL`, `DJANGO_SUPERUSER_PASSWORD` | You enter them in Render. They're used once, to create the admin; then delete the password from Render. |
-| `DEEPGRAM_API_KEY` | You enter it in Render. Optional: without it, recordings aren't transcribed. |
 | `SCORER_URL`, `SCORER_SECRET` | You enter them in Render. Optional: the Modal phoneme service (see [Pronunciation scorer](#pronunciation-scorer-modal)). |
+| `TRANSCRIBER_URL` | You enter it in Render. Optional: a reachable Whisper container (`scorer/Dockerfile.transcriber`), which Render doesn't run for you. Without it, recordings aren't transcribed. |
 | `DJANGO_SUPERUSER_USERNAME`, `DEBUG`, `LOG_LEVEL` | Fixed in `render.yaml` (`admin`, `False`, `INFO`). |
 | `ALLOWED_HOSTS` | Not needed. Django adds Render's own `RENDER_EXTERNAL_HOSTNAME` automatically. Set it only for a custom domain. |
 
@@ -223,7 +226,7 @@ Don't copy the local `.env` into Render. Its hostnames (`db`, `redis`) only exis
    Don't use the Direct connection, which is IPv6-only, or the Transaction pooler on port 6543.
 2. **Render → New → Blueprint**: pick this repository. Render reads `render.yaml`, generates `SECRET_KEY`, and asks for each `sync: false` value. Paste them there and nowhere else.
    If you already created the web service by hand, delete it first, or keep it and set the same variables in its **Environment**. Render's `sync: false` prompts only appear when a Blueprint creates a service.
-3. Render deploys automatically. A healthy deploy log shows `Applying ... OK` (or `No migrations to apply`), then `Created superuser`, then `Listening at: http://0.0.0.0:10000`. Later pushes deploy only after CI passes (`autoDeployTrigger: checksPass`).
+3. Render deploys automatically. A healthy deploy log shows `Applying ... OK` (or `No migrations to apply`), then `Created superuser`, then Daphne's `Listening on TCP address 0.0.0.0:10000`. Later pushes deploy only after CI passes (`autoDeployTrigger: checksPass`).
 4. Open `https://<app>.onrender.com/` and `/admin/`. Then delete `DJANGO_SUPERUSER_PASSWORD` from Render's Environment: the admin already exists, and `ensure_superuser` skips users that do.
 5. Render's health check calls `/health/`, which checks both Postgres and Redis.
 
@@ -277,11 +280,11 @@ Flags live in the admin under **Core → Feature flags**. Tick or untick **Enabl
 
 | Flag | Controls |
 | --- | --- |
-| `recording` | The recorder on the home page and new uploads. When off, the page says recording is unavailable and `POST /api/recordings/` returns 503. Recordings already in progress can still be played and deleted. |
-| `transcription` | Sending recordings to Deepgram. When off, uploads return `transcript: null`, no text is shown, and live captions are off too. It also needs `DEEPGRAM_API_KEY`. |
-| `live_captions` | Captions while speaking (needs `transcription` and a Member-role key). When off, recordings are transcribed after Stop instead. |
+| `recording` | The recorder on the home page and the recording websocket. When off, the page says recording is unavailable and the socket closes with `4503`. Recordings already made can still be played and deleted. |
+| `transcription` | Sending recordings to Whisper. When off, the transcript comes back `null` and no text or pairs are shown. It also needs `TRANSCRIBER_URL` and `SCORER_SECRET`. |
+| `keep_audio` | Eval mode: keeps the audio after playback so attempts can be promoted to eval clips. Off by default; turn it off again after collecting clips. |
 
-All flags are created switched on by migrations. A flag that doesn't exist counts as off.
+`recording` and `transcription` are created switched on by migrations, `keep_audio` off. A flag that doesn't exist counts as off.
 
 ## Tests
 
@@ -289,13 +292,13 @@ Browser tests use [Playwright](https://playwright.dev) and live in `e2e/`. They 
 
 Screenshot baselines are not committed (`e2e/tests/*-snapshots/` is gitignored). The first run on a machine writes them; later runs on that machine compare against them. CI starts fresh each time, so it checks layout but not visual changes.
 
-Django unit tests cover the recordings API and cleanup:
+Django unit tests cover the recording websocket (with Channels' `WebsocketCommunicator`, the services mocked), playback, cleanup, the clients and the eval bench:
 
 ```bash
 docker compose exec web python manage.py test
 ```
 
-On Chromium devices, Playwright also runs the full record → play → delete flow using a fake microphone. Playwright's WebKit can't record, so the iPhone projects check layout only.
+On Chromium devices, Playwright also runs the full record → play → delete flow over the real websocket, using a fake microphone. It runs against `web-e2e`, a copy of `web` without Whisper and the scorer, so results come back at once (as nulls). One test passes the socket through to the server but swaps in realistic results (`page.routeWebSocket`), to check the 80 ms PCM chunks, Stop, and the word pairs on screen. Playwright's WebKit can't record, so the iPhone projects check layout only.
 
 ```bash
 docker compose run --rm e2e                       # run all tests
@@ -323,9 +326,10 @@ GitHub Actions runs the same suite on every push and pull request, recording a v
 ## Project layout
 
 ```
-config/   Django settings, URLs, WSGI and Celery app
-core/     Landing page, health check, tasks and management commands
-scorer/   Phoneme service: engine.py (shared), scorer.py (Modal GPU), local.py + Dockerfile (local CPU)
+config/   Django settings, URLs, ASGI (HTTP + /ws/record/) and Celery app
+core/     Recorder page and websocket (consumers.py, analysis.py), eval bench, health check, tasks
+scorer/   Speech services: engine.py (shared), scorer.py (Modal GPU) and local.py + Dockerfile (wav2vec2 on CPU),
+          transcriber.py + Dockerfile.transcriber (Whisper on CPU)
 ```
 
 ## Evals

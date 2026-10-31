@@ -127,6 +127,55 @@ body {
   font: 15px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
+.phonemes-drift,
+.phonemes-legend {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.phonemes-legend { margin: 10px 0 0; font-size: 12px; }
+
+/* Each word over its phonemes: expected on top, heard below, mismatches in the accent colour. */
+.phoneme-pairs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+}
+
+.pair-word {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pair-label {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.pair-ops { display: flex; gap: 2px; }
+
+.pair-op {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 1.3em;
+  font: 15px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.pair-heard {
+  width: 100%;
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+.pair-sub,
+.pair-del,
+.pair-ins {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .transcript-empty {
   border-left-color: var(--border);
   color: var(--muted);
@@ -135,7 +184,7 @@ body {
 
 .word { animation: landed 0.3s ease-out both; }
 
-/* Captions, spinner and Play share the space just above the mic. */
+/* Spinner and Play share the space just above the mic. */
 .session-lower {
   margin-top: auto;
   width: min(100%, 32rem);
@@ -143,15 +192,6 @@ body {
   display: flex;
   justify-content: center;
   align-items: center;
-}
-
-.captions {
-  margin: 0;
-  font-size: 18px;
-  line-height: 1.5;
-  font-style: italic;
-  color: var(--muted);
-  overflow-wrap: anywhere;
 }
 
 .spinner {

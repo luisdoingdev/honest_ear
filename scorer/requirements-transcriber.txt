@@ -1,0 +1,6 @@
+faster-whisper>=1.1,<2
+# faster-whisper 1.2 opens audio with av.open(metadata_errors=...), which PyAV 18+ no longer accepts.
+av>=15,<18
+numpy>=2
+fastapi>=0.115
+uvicorn>=0.32

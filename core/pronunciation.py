@@ -1,6 +1,6 @@
 """Pronunciation scoring for the eval bench, as plain functions: no network, no database.
 
-For one clip, given what the pipeline heard (Deepgram's transcript and wav2vec2's phonemes):
+For one clip, given what the pipeline heard (Whisper's transcript and wav2vec2's phonemes):
 1. Gates: clips shorter than `min_duration_s` are `too_short`; clips whose transcript shares too few words
    with the intended text are `wrong_sentence`. Neither is scored.
 2. Expected phonemes: the intended text, word by word, through espeak-ng (the phonemizer this model's
@@ -11,6 +11,7 @@ For one clip, given what the pipeline heard (Deepgram's transcript and wav2vec2'
 
 import json
 import re
+import threading
 import unicodedata
 from collections import Counter
 from pathlib import Path
@@ -19,6 +20,8 @@ CONFIG_PATH = Path(__file__).parent / "eval_config" / "scoring.json"
 # espeak-ng voices: Latin American Spanish (the audience) and US English.
 ESPEAK_VOICES = {"es": "es-419", "en": "en-us"}
 BANDS = ("good", "okay", "off")
+# espeak-ng isn't thread-safe, and the recording websocket phonemizes from worker threads.
+_espeak = threading.Lock()
 
 
 class ConfigError(ValueError):
@@ -59,16 +62,17 @@ def expected_phonemes(text, language):
         return []
     from phonemizer.separator import Separator
 
-    phonemized = phonemize(
-        text_words,
-        language=ESPEAK_VOICES[language],
-        backend="espeak",
-        # Each line is one word; a distinct word separator keeps phonemizer's word-count check quiet.
-        separator=Separator(phone=" ", word=" | ", syllable=""),
-        strip=True,
-        preserve_punctuation=False,
-        with_stress=False,
-    )
+    with _espeak:
+        phonemized = phonemize(
+            text_words,
+            language=ESPEAK_VOICES[language],
+            backend="espeak",
+            # Each line is one word; a distinct word separator keeps phonemizer's word-count check quiet.
+            separator=Separator(phone=" ", word=" | ", syllable=""),
+            strip=True,
+            preserve_punctuation=False,
+            with_stress=False,
+        )
     return [(word, [t for t in phonemes.split() if t != "|"]) for word, phonemes in zip(text_words, phonemized)]
 
 
