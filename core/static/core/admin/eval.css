@@ -10,3 +10,12 @@
 .ev-sub, .ev-del, .ev-ins { color: #ba2121; font-weight: 600; }
 .ev-gap { color: var(--body-quiet-color, #999); font-weight: 400; }
 .ev-legend { margin-top: 10px; font-size: 12px; color: var(--body-quiet-color, #666); }
+
+/* Run report */
+.ev-metrics { display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0 8px; }
+.ev-metric { padding: 12px 16px; border: 1px solid var(--hairline-color, #ddd); border-radius: 6px; min-width: 220px; }
+.ev-metric-value { font-size: 28px; font-weight: 600; }
+.ev-metric-label { font-size: 12px; color: var(--body-quiet-color, #666); max-width: 260px; }
+.ev-confusion td { text-align: center; min-width: 4em; }
+.ev-agree { background: rgba(68, 153, 68, 0.15); font-weight: 600; }
+.ev-disagree { background: rgba(186, 33, 33, 0.12); }

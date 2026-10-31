@@ -178,3 +178,49 @@ class ClipDetailTests(TestCase):
         run = EvalRun.objects.create(config_version="1", config={})
         EvalResult.objects.create(run=run, clip=self.clip, status="wrong_sentence", alignment=[])
         self.assertContains(self.page(), "<strong>Wrong sentence</strong>", html=False)
+
+
+class ReportTests(TestCase):
+    def setUp(self):
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        override = override_settings(MEDIA_ROOT=media)
+        override.enable()
+        self.addCleanup(override.disable)
+        self.run_ = EvalRun.objects.create(config_version="1", config={})
+        rows = [
+            ("good one", "good", "good", 0.05),
+            ("heard as off", "good", "off", 0.7),
+            ("slightly off", "okay", "good", 0.1),
+            ("truly off", "off", "off", 0.8),
+        ]
+        results = []
+        for text, human, band, per in rows:
+            clip = EvalClip(intended_text=text, human_label=human)
+            clip.audio.save(f"{text}.wav", ContentFile(b"x"), save=True)
+            alignment = [{"word": "w", "ops": [{"op": "sub", "expected": "ɣ", "heard": "ɡ"}]}]
+            results.append(EvalResult.objects.create(
+                run=self.run_, clip=clip, human_label=human, status="scored", per=per, predicted_band=band, alignment=alignment,
+            ))
+        self.run_.summary = bench.summarize(results)
+        self.run_.save()
+        self.url = f"/admin/core/evalrun/{self.run_.pk}/report/"
+
+    def test_only_staff_can_see_it(self):
+        self.assertEqual(self.client.get(self.url).status_code, 302)
+
+    def test_report_page(self):
+        self.client.force_login(get_user_model().objects.create_superuser("bench", "b@example.com", "pw-123456"))
+        page = self.client.get(self.url)
+
+        self.assertContains(page, "50.0%")
+        self.assertContains(page, "Human ↓ / Predicted →")
+        body = page.content.decode()
+        # The worst disagreement (good heard as off, two bands apart) comes before the one-band miss.
+        self.assertLess(body.index("heard as off"), body.index("slightly off"))
+        self.assertContains(page, "2 bands")
+        self.assertNotIn("good one</a>", body, "agreements are not listed as disagreements")
+        clip = EvalClip.objects.get(intended_text="heard as off")
+        self.assertContains(page, f"/admin/core/evalclip/{clip.pk}/change/")
+        self.assertContains(page, "ɣ→ɡ")
+        self.assertContains(self.client.get("/admin/core/evalrun/"), f'href="{self.url}"')

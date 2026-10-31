@@ -2,7 +2,9 @@ import logging
 
 from django.contrib import admin, messages
 from django.core.files.base import ContentFile
-from django.urls import reverse
+from django.shortcuts import get_object_or_404
+from django.template.response import TemplateResponse
+from django.urls import path, reverse
 from django.utils.html import format_html, format_html_join
 
 from . import bench
@@ -184,9 +186,56 @@ class EvalResultInline(admin.TabularInline):
 
 @admin.register(EvalRun)
 class EvalRunAdmin(admin.ModelAdmin):
-    list_display = ("__str__", "created_at", "config_version", "clip_count", "agreement", "spearman")
-    readonly_fields = ("created_at", "config_version", "config", "summary")
+    list_display = ("__str__", "created_at", "config_version", "clip_count", "agreement", "spearman", "report_link")
+    readonly_fields = ("report_link", "created_at", "config_version", "config", "summary")
     inlines = [EvalResultInline]
+
+    def get_urls(self):
+        report = path(
+            "<int:run_id>/report/", self.admin_site.admin_view(self.report_view), name="core_evalrun_report"
+        )
+        return [report, *super().get_urls()]
+
+    @admin.display(description="Report")
+    def report_link(self, obj):
+        return format_html('<a href="{}">Report</a>', reverse("admin:core_evalrun_report", args=[obj.pk]))
+
+    def report_view(self, request, run_id):
+        run = get_object_or_404(EvalRun, pk=run_id)
+        summary = run.summary
+        bands = list(bench.LABEL_RANK)
+        confusion = [
+            {
+                "label": human,
+                "cells": [{"count": summary["confusion"][human][band], "agrees": human == band} for band in bands],
+                "total": sum(summary["confusion"][human].values()),
+            }
+            for human in bands
+        ]
+        judged = run.results.select_related("clip").filter(status=EvalResult.Status.SCORED).exclude(human_label="")
+        disagreements = sorted(
+            (
+                {"result": r, "distance": abs(bench.LABEL_RANK[r.predicted_band] - bench.LABEL_RANK[r.human_label])}
+                for r in judged
+                if r.predicted_band != r.human_label
+            ),
+            # Furthest apart first; among those, the PER that most contradicts the label.
+            key=lambda item: (
+                -item["distance"],
+                item["result"].per if item["result"].human_label == "off" else -item["result"].per,
+            ),
+        )
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Report: {run}",
+            "opts": self.model._meta,
+            "run": run,
+            "summary": summary,
+            "bands": bands,
+            "confusion": confusion,
+            "disagreements": disagreements,
+        }
+        return TemplateResponse(request, "admin/core/evalrun/report.html", context)
 
     def has_add_permission(self, request):
         return False

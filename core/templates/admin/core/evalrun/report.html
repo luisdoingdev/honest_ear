@@ -1,0 +1,81 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static 'core/admin/eval.css' %}">{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a>
+  &rsaquo; <a href="{% url 'admin:core_evalrun_changelist' %}">Eval runs</a>
+  &rsaquo; <a href="{% url 'admin:core_evalrun_change' run.pk %}">{{ run }}</a>
+  &rsaquo; Report
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main" class="ev-report">
+  <p>Config v{{ run.config_version }} · {{ summary.clips }} clip{{ summary.clips|pluralize }}:
+    {{ summary.statuses.scored }} scored, {{ summary.statuses.wrong_sentence }} wrong sentence,
+    {{ summary.statuses.too_short }} too short, {{ summary.statuses.error }} error{{ summary.statuses.error|pluralize }}.
+    Metrics use the {{ summary.judged }} scored clip{{ summary.judged|pluralize }} that have a human label.</p>
+
+  <div class="ev-metrics">
+    <div class="ev-metric">
+      <div class="ev-metric-value">{% if summary.agreement is None %}—{% else %}{{ summary.agreement }}%{% endif %}</div>
+      <div class="ev-metric-label">Agreement: predicted band equals the human label</div>
+    </div>
+    <div class="ev-metric">
+      <div class="ev-metric-value">{% if summary.spearman is None %}—{% else %}{{ summary.spearman }}{% endif %}</div>
+      <div class="ev-metric-label">Spearman, PER vs label (good &lt; okay &lt; off). Near +1: higher PER where you heard worse.</div>
+    </div>
+  </div>
+
+  <h2>Human label vs predicted band</h2>
+  <table class="ev-confusion">
+    <thead>
+      <tr><th>Human ↓ / Predicted →</th>{% for band in bands %}<th>{{ band }}</th>{% endfor %}<th>Total</th></tr>
+    </thead>
+    <tbody>
+      {% for row in confusion %}
+      <tr>
+        <th>{{ row.label }}</th>
+        {% for cell in row.cells %}<td class="{% if cell.agrees %}ev-agree{% elif cell.count %}ev-disagree{% endif %}">{{ cell.count }}</td>{% endfor %}
+        <td>{{ row.total }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Worst disagreements</h2>
+  {% if disagreements %}
+  <table>
+    <thead><tr><th>Clip</th><th>Human</th><th>Predicted</th><th>PER</th><th>Off by</th></tr></thead>
+    <tbody>
+      {% for item in disagreements %}
+      <tr>
+        <td><a href="{% url 'admin:core_evalclip_change' item.result.clip_id %}">{{ item.result.clip.intended_text|truncatechars:70 }}</a></td>
+        <td>{{ item.result.get_human_label_display }}</td>
+        <td>{{ item.result.get_predicted_band_display }}</td>
+        <td>{{ item.result.per|floatformat:3 }}</td>
+        <td>{{ item.distance }} band{{ item.distance|pluralize }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>None: every scored, labeled clip landed in the band you gave it.</p>
+  {% endif %}
+
+  <h2>Most common substitutions</h2>
+  {% if summary.top_substitutions %}
+  <table>
+    <thead><tr><th>Expected → heard</th><th>Times</th></tr></thead>
+    <tbody>
+      {% for pair, times in summary.top_substitutions %}<tr><td class="ev-op">{{ pair }}</td><td>{{ times }}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No substitutions in this run.</p>
+  {% endif %}
+</div>
+{% endblock %}
