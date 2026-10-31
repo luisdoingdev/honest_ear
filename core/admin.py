@@ -2,9 +2,11 @@ import logging
 
 from django.contrib import admin, messages
 from django.core.files.base import ContentFile
+from django.urls import reverse
 from django.utils.html import format_html
 
-from .models import Attempt, EvalClip, FeatureFlag, Recording
+from . import bench
+from .models import Attempt, EvalClip, EvalResult, EvalRun, FeatureFlag, Recording
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,22 @@ class EvalClipAdmin(admin.ModelAdmin):
     search_fields = ("intended_text", "notes")
     readonly_fields = ("player", "source_attempt", "created_at")
     fields = ("audio", "player", "intended_text", "language", "human_label", "notes", "source_attempt", "created_at")
+    actions = ["run_bench"]
+
+    @admin.action(description="Run bench on the selected clips")
+    def run_bench(self, request, queryset):
+        run = bench.run_bench(list(queryset.order_by("created_at")))
+        summary = run.summary
+        url = reverse("admin:core_evalrun_change", args=[run.pk])
+        self.message_user(
+            request,
+            format_html(
+                'Run {} done: {} clip(s), {} scored and labeled, agreement {}. <a href="{}">Open the run</a>.',
+                run.pk, summary["clips"], summary["judged"],
+                "—" if summary["agreement"] is None else f"{summary['agreement']}%", url,
+            ),
+            messages.SUCCESS if not summary["statuses"]["error"] else messages.WARNING,
+        )
 
     @admin.display(description="Intended text", ordering="intended_text")
     def short_text(self, obj):
@@ -108,3 +126,37 @@ class EvalClipAdmin(admin.ModelAdmin):
         if not obj.audio:
             return "—"
         return format_html('<audio controls preload="none" src="{}"></audio>', obj.audio.url)
+
+
+class EvalResultInline(admin.TabularInline):
+    model = EvalResult
+    extra = 0
+    can_delete = False
+    fields = ("clip", "human_label", "status", "per", "predicted_band", "word_overlap", "error")
+    readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(EvalRun)
+class EvalRunAdmin(admin.ModelAdmin):
+    list_display = ("__str__", "created_at", "config_version", "clip_count", "agreement", "spearman")
+    readonly_fields = ("created_at", "config_version", "config", "summary")
+    inlines = [EvalResultInline]
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.display(description="Clips")
+    def clip_count(self, obj):
+        return obj.summary.get("clips")
+
+    @admin.display(description="Agreement %")
+    def agreement(self, obj):
+        return obj.summary.get("agreement")
+
+    @admin.display(description="Spearman")
+    def spearman(self, obj):
+        return obj.summary.get("spearman")
+
