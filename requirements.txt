@@ -6,3 +6,4 @@ django-environ>=0.12,<1
 gunicorn>=23,<24
 whitenoise>=6.8,<7
 httpx>=0.28,<1
+phonemizer>=3.3,<4

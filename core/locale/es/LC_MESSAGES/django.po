@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Honest Ear\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 18:42+0000\n"
+"POT-Creation-Date: 2026-10-30 23:17+0000\n"
 "PO-Revision-Date: 2026-10-30 17:30+0000\n"
 "Last-Translator: Honest Ear\n"
 "Language-Team: Spanish\n"
@@ -15,49 +15,53 @@ msgstr ""
 "Plural-Forms: nplurals=3; plural=n == 1 ? 0 : n != 0 && n % 1000000 == 0 ? "
 "1 : 2;\n"
 
-#: templates/core/record.html:21
+#: templates/core/record.html:23
 msgid "Start a session to record your voice."
 msgstr "Empieza una sesión para grabar tu voz."
 
-#  "Iniciar sesión" would read as "Log in", so this says "Begin".
 #: templates/core/record.html:25
-msgid "Start session"
-msgstr "Empezar"
-
-#: templates/core/record.html:26
-msgid "Record"
-msgstr "Grabar"
-
-#: templates/core/record.html:27
-msgid "Stop"
-msgstr "Detener"
-
-#: templates/core/record.html:28
-msgid "Play"
-msgstr "Reproducir"
-
-#: templates/core/record.html:31
 msgid "Recording is unavailable right now. Please check back soon."
 msgstr ""
 "La grabación no está disponible en este momento. Vuelve a intentarlo pronto."
 
-#: views.py:33
+#: templates/core/record.html:32
+msgid "Phonemes"
+msgstr "Fonemas"
+
+#: templates/core/record.html:39
+msgid "Play"
+msgstr "Reproducir"
+
+#  "Iniciar sesión" would read as "Log in", so this says "Begin".
+#: templates/core/record.html:43
+msgid "Start session"
+msgstr "Empezar"
+
+#: views.py:62
+msgid "Live captions are unavailable right now."
+msgstr "Los subtítulos en vivo no están disponibles en este momento."
+
+#: views.py:76
+msgid "Too many sessions. Try again in a minute."
+msgstr "Demasiadas sesiones. Vuelve a intentarlo en un minuto."
+
+#: views.py:93
 msgid "Recording is turned off right now."
 msgstr "La grabación está desactivada en este momento."
 
-#: views.py:38
+#: views.py:98
 msgid "No audio was uploaded."
 msgstr "No se subió ningún audio."
 
-#: views.py:43
+#: views.py:103
 #, python-format
 msgid "Unsupported audio type: %(type)s"
 msgstr "Tipo de audio no compatible: %(type)s"
 
-#: views.py:47
+#: views.py:107
 msgid "Recording is too large (5 MB max)."
 msgstr "La grabación es demasiado grande (máximo 5 MB)."
 
-#: views.py:73
+#: views.py:162
 msgid "Couldn't transcribe this recording."
 msgstr "No se pudo transcribir esta grabación."

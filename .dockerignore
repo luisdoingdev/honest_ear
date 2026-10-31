@@ -5,3 +5,6 @@ __pycache__/
 staticfiles/
 .venv/
 **/*.mo
+# The Modal phoneme service deploys on its own (modal deploy scorer/scorer.py).
+scorer/
+media/

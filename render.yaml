@@ -7,17 +7,25 @@ services:
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile
-    # `/health/` also checks Redis and returns 503 without it; switch once REDIS_URL is real.
-    healthCheckPath: /
+    healthCheckPath: /health/
     autoDeployTrigger: checksPass
     envVars:
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
         sync: false
+      # The cache, including the live-captions rate limit. Without a real Redis, live captions stay off.
       - key: REDIS_URL
-        sync: false
+        fromService:
+          type: keyvalue
+          name: honest-ear-redis
+          property: connectionString
       - key: DEEPGRAM_API_KEY
+        sync: false
+      # The Modal phoneme service's endpoint and shared secret (see README).
+      - key: SCORER_URL
+        sync: false
+      - key: SCORER_SECRET
         sync: false
       - key: DJANGO_SUPERUSER_USERNAME
         value: admin
@@ -29,3 +37,10 @@ services:
         value: "False"
       - key: LOG_LEVEL
         value: INFO
+
+  - type: keyvalue
+    name: honest-ear-redis
+    plan: free
+    # Empty: reachable only from this workspace's services, never the internet.
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru

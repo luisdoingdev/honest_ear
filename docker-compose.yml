@@ -61,7 +61,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Only for tools on the Mac (Django uses db:5432 inside Docker). 5433 avoids a local Postgres.
+      - "${POSTGRES_PORT:-5433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -73,14 +74,40 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      # Only for tools on the Mac (Django uses redis:6379 inside Docker).
+      - "${REDIS_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+  # Local CPU phoneme service (scorer/local.py), the same contract as the Modal one.
+  # Opt-in: docker compose --profile scorer up -d scorer. Django reaches it at http://scorer:8000/.
+  scorer:
+    build: ./scorer
+    profiles: ["scorer"]
+    environment:
+      # The same shared secret as Django's SCORER_SECRET, read from .env.
+      SCORER_SECRET: ${SCORER_SECRET:-}
+      SCORER_QUANTIZE: ${SCORER_QUANTIZE:-}
+    volumes:
+      - scorer_hf_cache:/cache
+    ports:
+      # Only for curl from the Mac; override with SCORER_PORT if taken.
+      - "${SCORER_PORT:-8011}:8000"
+    # Docker's VM is small; cap the model so it can't starve Postgres and the rest.
+    mem_limit: 2500m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      # First start downloads ~1.2 GB of weights; later starts only load them.
+      start_period: 600s
+
 volumes:
   postgres_data:
   redis_data:
   e2e_node_modules:
+  scorer_hf_cache:
