@@ -165,26 +165,35 @@ docker compose --profile scorer up -d --build scorer
 
 ## Eval bench (admin)
 
-A place to check whether the scores agree with your ear, before any scoring is shown to visitors. Everything happens in the admin under **Core → Eval clips**.
+One question: **does the pronunciation score agree with human judgement, and how often?** Everything is in the Django admin under **Core**.
 
-1. **Add a clip:** upload the audio (webm, ogg, mp4/m4a, mp3 or wav), type what the speaker meant to say, choose its language (es or en), and label it **good**, **okay** or **off** by ear. The clip's page has a player.
-2. **Run eval:** select clips in the list, choose **Run eval on the selected clips** and click Go. Each clip goes through the same pipeline as a live recording, Deepgram and the phoneme scorer at the same time, and two scores are saved on the row:
-   - **Phoneme score (0–100):** the phonemes wav2vec2 heard compared with the intended text's *expected* phonemes, as 100 × (1 − edit distance ÷ expected length). The expected phonemes come from espeak-ng, the phonemizer this model's training labels were made with, so both sides use the same IPA symbols. Latin American Spanish (`es-419`) or US English.
-   - **Word score (0–100):** Deepgram's transcript compared with the intended text, as 100 × (1 − word error rate). Case and punctuation don't count; accents do.
-3. **Look:** the list shows label, both scores, when it was evaluated, and whether anything failed. Filter by label, then sort by score: are the **off** clips scoring low? Each clip's page shows the expected phonemes, the heard phonemes and the transcript side by side.
+### 1. Golden set (Eval clips)
 
-What a first run with three Mac voices reading one Spanish sentence looked like:
+Each clip has its audio, the **intended text** (typed by a human, never copied from Deepgram), its language, a **human label** (good, okay or off, by ear) and notes.
 
-| Label | Phoneme | Word |
-| --- | --- | --- |
-| good (native voice) | 89.6 | 90.0 |
-| okay (English voice reading the Spanish) | 33.3 | 50.0 |
-| off (a different sentence) | 22.9 | 0.0 |
+- **Upload** a clip on the Eval clips page.
+- **Or promote a real recording:** turn on the `keep_audio` feature flag (off by default) and record on the site. While the flag is on, the audio isn't deleted after playback, and the page says "Kept for evaluation". Then, in **Attempts**, select attempts and choose **Promote to EvalClip**. That copies the audio and links the attempt, leaving the intended text and label for you to fill in. Turn `keep_audio` off again when you're done; visitors are promised their audio is deleted.
 
-- **Unrelated speech scores about 20 on phonemes, not 0**, because any two sentences share common sounds.
-- **Deepgram writes numbers as digits** (`smart_format`), so "dos" heard as "2" costs word score.
-- **Which scorer is used:** whatever `SCORER_URL` points at. The local container (`http://scorer:8000/`, timeout 30) is the easy choice for the bench: no cold starts and no GPU bill. If a scorer or Deepgram fails, that score stays empty and the reason is in the clip's eval error; the other score is still saved.
-- **Where the audio lives:** uploaded clips go to `media/eval_clips/`, which is gitignored. Django serves them for the player only with `DEBUG` on, so the bench is meant for local use.
+### 2. Scoring (`core/pronunciation.py`, configured in `core/eval_config/scoring.json`)
+
+1. **Too short:** clips under `min_duration_s` (1.5 s) are not scored.
+2. **Wrong sentence:** if fewer than `wrong_sentence_min_overlap` (50%) of the intended words appear in Deepgram's transcript, the clip is marked `wrong_sentence` and not scored.
+3. **Expected phonemes:** the intended text, word by word, through espeak-ng (`es-419` or `en-us`). espeak is the phonemizer this model's training labels came from, so both sides use the same IPA symbols.
+4. **Alignment:** Levenshtein with backtrace, one op per phoneme (match, sub, ins or del), grouped by word. Among equally cheap alignments it picks the one with the most matches.
+5. **PER** = (sub + ins + del) / expected phonemes, then a band: `good` up to `bands.good`, `okay` up to `bands.okay`, `off` above. The thresholds live only in the JSON config. Bump its `version` whenever you change a value: every run stores the config it used.
+
+### 3. Runs and the report
+
+- Select clips in **Eval clips** and choose **Run bench on the selected clips**. That creates an **Eval run**: each clip goes through the real pipeline, Deepgram and the phoneme scorer at once, and gets an **Eval result** with status, PER, predicted band, alignment and the human label as it was at run time. If a service fails, that clip's status is `error` and the reason is saved.
+- Each clip's page shows its **latest run**: expected phonemes above heard, per word, with mismatches in red.
+- Each run has a **Report** (linked from the Eval runs list):
+  - agreement % and Spearman correlation between PER and label (good < okay < off; near +1 means higher PER where you heard worse),
+  - the 3×3 grid of human label vs predicted band,
+  - the clips with the worst disagreement, linked to their pages,
+  - the most common substitutions.
+- `docker compose exec web python manage.py write_eval_summary` writes the latest run's summary into the **Evals** section at the end of this README.
+
+The scorer used is whatever `SCORER_URL` points at. For the bench, the local container (`http://scorer:8000/`, `SCORER_TIMEOUT_SECONDS=30`) avoids Modal's cold starts. Uploaded clips are stored in `media/eval_clips/` (gitignored) and played only with `DEBUG` on, so the bench is meant for local use.
 
 ## Deploying (Render + Supabase)
 
@@ -318,3 +327,20 @@ config/   Django settings, URLs, WSGI and Celery app
 core/     Landing page, health check, tasks and management commands
 scorer/   Phoneme service: engine.py (shared), scorer.py (Modal GPU), local.py + Dockerfile (local CPU)
 ```
+
+## Evals
+
+<!-- evals:start (written by `manage.py write_eval_summary`; edits inside are replaced) -->
+Latest run: **Run 2 (2026-10-31 15:18, config v1)**, 7 clips (5 scored, 1 wrong sentence, 1 too short, 0 error). Metrics use the 5 scored clips with a human label.
+
+- **Agreement** (predicted band = human label): 40.0%
+- **Spearman**, PER vs label (good < okay < off): 0.649
+
+| Human ↓ / Predicted → | good | okay | off |
+| --- | --- | --- | --- |
+| good | 2 | 0 | 0 |
+| okay | 0 | 0 | 2 |
+| off | 0 | 1 | 0 |
+
+Most common substitutions: `ɾ→r` ×8, `a→ɐ` ×6, `e→i` ×5, `s→z` ×4, `ɾ→ɹ` ×3.
+<!-- evals:end -->
