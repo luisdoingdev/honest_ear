@@ -3,7 +3,7 @@ import logging
 from django.contrib import admin, messages
 from django.core.files.base import ContentFile
 from django.urls import reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 
 from . import bench
 from .models import Attempt, EvalClip, EvalResult, EvalRun, FeatureFlag, Recording
@@ -93,9 +93,52 @@ class EvalClipAdmin(admin.ModelAdmin):
     list_editable = ("human_label",)
     list_filter = ("human_label", "language", ("source_attempt", admin.EmptyFieldListFilter))
     search_fields = ("intended_text", "notes")
-    readonly_fields = ("player", "source_attempt", "created_at")
-    fields = ("audio", "player", "intended_text", "language", "human_label", "notes", "source_attempt", "created_at")
+    readonly_fields = ("player", "source_attempt", "created_at", "latest_alignment")
+    fields = (
+        "audio", "player", "intended_text", "language", "human_label", "notes", "source_attempt", "created_at",
+        "latest_alignment",
+    )
     actions = ["run_bench"]
+
+    class Media:
+        css = {"all": ("core/admin/eval.css",)}
+
+    @admin.display(description="Latest run")
+    def latest_alignment(self, obj):
+        result = obj.results.select_related("run").order_by("-run__created_at", "-pk").first() if obj.pk else None
+        if result is None:
+            return "Not run yet: select this clip in the list and choose Run bench."
+        run_link = format_html(
+            '<a href="{}">run {}</a>', reverse("admin:core_evalrun_change", args=[result.run_id]), result.run_id
+        )
+        if result.status != EvalResult.Status.SCORED:
+            return format_html(
+                '<p class="ev-summary">{}: <strong>{}</strong>{}</p>',
+                run_link, result.get_status_display(), f" ({result.error})" if result.error else "",
+            )
+        summary = format_html(
+            '<p class="ev-summary">{}: PER <strong>{}</strong> → predicted <strong>{}</strong>, human label <strong>{}</strong></p>',
+            run_link, f"{result.per:.3f}", result.get_predicted_band_display(),
+            result.get_human_label_display() or "none",
+        )
+        words = format_html_join(
+            "",
+            '<div class="ev-word"><div class="ev-word-label">{}</div><div class="ev-ops">{}</div></div>',
+            ((word["word"], self._ops(word["ops"])) for word in result.alignment),
+        )
+        legend = format_html('<p class="ev-legend">Top row: expected. Bottom row: heard. Red: substituted, dropped (–) or extra.</p>')
+        return format_html('{}<div class="ev-words">{}</div>{}', summary, words, legend)
+
+    @staticmethod
+    def _ops(ops):
+        def cell(phoneme):
+            return format_html('<span class="ev-gap">–</span>') if phoneme is None else phoneme
+
+        return format_html_join(
+            "",
+            '<span class="ev-op ev-{}"><span class="ev-exp">{}</span><span class="ev-heard">{}</span></span>',
+            ((op["op"], cell(op["expected"]), cell(op["heard"])) for op in ops),
+        )
 
     @admin.action(description="Run bench on the selected clips")
     def run_bench(self, request, queryset):

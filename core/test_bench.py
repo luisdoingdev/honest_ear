@@ -136,3 +136,45 @@ class RunBenchTests(TestCase):
         run = EvalRun.objects.get()
         self.assertContains(res, f"Run {run.pk} done: 1 clip(s), 1 scored and labeled, agreement 100.0%")
         self.assertContains(self.client.get("/admin/core/evalrun/"), "Agreement %")
+
+
+class ClipDetailTests(TestCase):
+    def setUp(self):
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        override = override_settings(MEDIA_ROOT=media)
+        override.enable()
+        self.addCleanup(override.disable)
+        self.client.force_login(get_user_model().objects.create_superuser("bench", "b@example.com", "pw-123456"))
+        self.clip = EvalClip(intended_text="hola bogotá", language="es", human_label="good")
+        self.clip.audio.save("c.wav", ContentFile(b"x"), save=True)
+
+    def page(self):
+        return self.client.get(f"/admin/core/evalclip/{self.clip.pk}/change/")
+
+    def test_before_any_run(self):
+        self.assertContains(self.page(), "Not run yet")
+
+    def test_latest_alignment_per_word_with_mismatches_marked(self):
+        old = EvalRun.objects.create(config_version="1", config={})
+        EvalResult.objects.create(run=old, clip=self.clip, status="scored", per=0.9, predicted_band="off", alignment=[])
+        run = EvalRun.objects.create(config_version="1", config={})
+        EvalResult.objects.create(
+            run=run, clip=self.clip, human_label="good", status="scored", per=1 / 9, predicted_band="good",
+            alignment=[
+                {"word": "hola", "ops": [{"op": "match", "expected": "o", "heard": "o"}, {"op": "del", "expected": "l", "heard": None}]},
+                {"word": "<b>bogotá</b>", "ops": [{"op": "sub", "expected": "ɣ", "heard": "ɡ"}, {"op": "ins", "expected": None, "heard": "a"}]},
+            ],
+        )
+        page = self.page()
+        self.assertContains(page, "core/admin/eval.css")
+        self.assertContains(page, f"run {run.pk}")
+        self.assertContains(page, "PER <strong>0.111</strong> → predicted <strong>Good</strong>")
+        self.assertContains(page, '<span class="ev-op ev-sub"><span class="ev-exp">ɣ</span><span class="ev-heard">ɡ</span></span>', html=False)
+        self.assertContains(page, '<span class="ev-op ev-del"><span class="ev-exp">l</span><span class="ev-heard"><span class="ev-gap">–</span></span></span>', html=False)
+        self.assertContains(page, "&lt;b&gt;bogotá&lt;/b&gt;", msg_prefix="words are escaped")
+
+    def test_gated_results_say_why(self):
+        run = EvalRun.objects.create(config_version="1", config={})
+        EvalResult.objects.create(run=run, clip=self.clip, status="wrong_sentence", alignment=[])
+        self.assertContains(self.page(), "<strong>Wrong sentence</strong>", html=False)
