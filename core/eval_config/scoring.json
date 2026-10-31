@@ -1,0 +1,10 @@
+{
+  "version": "1",
+  "notes": "Starting guesses, to be tuned against the golden set. Bump version whenever a value changes: every EvalRun stores the config it used.",
+  "min_duration_s": 1.5,
+  "wrong_sentence_min_overlap": 0.5,
+  "bands": {
+    "good": 0.15,
+    "okay": 0.35
+  }
+}
