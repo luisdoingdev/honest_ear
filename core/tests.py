@@ -11,7 +11,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
-from . import evaluation, scoring, transcription
+from . import scoring, transcription
 from .models import Attempt, EvalClip, FeatureFlag, Recording
 from .tasks import delete_stale_recordings
 from .transcription import DEEPGRAM_URL
@@ -530,132 +530,91 @@ class RecordingFeatureFlagTests(OfflineTestCase):
         self.assertNotContains(self.client.get("/"), "Start session")
 
 
-class EvalScoreTests(SimpleTestCase):
-    def test_identical_and_empty(self):
-        self.assertEqual(evaluation.phoneme_score("o l a", "o l a"), 100.0)
-        self.assertEqual(evaluation.phoneme_score("o l a", ""), 0.0)
-        self.assertIsNone(evaluation.phoneme_score("", "o l a"), "nothing expected: no score")
-
-    def test_phonemes_are_compared_as_tokens_not_characters(self):
-        # One substituted phoneme out of four (tʃ is a single phoneme): 75.
-        self.assertEqual(evaluation.phoneme_score("tʃ e k s", "ʃ e k s"), 75.0)
-
-    def test_extra_noise_cannot_push_the_score_below_zero(self):
-        self.assertEqual(evaluation.phoneme_score("o", "a b c d e"), 0.0)
-
-    def test_word_score_ignores_case_and_punctuation_but_not_accents(self):
-        self.assertEqual(evaluation.word_score("¡Hola, cómo estás!", "hola cómo estás"), 100.0)
-        self.assertEqual(evaluation.word_score("hola cómo estás", "hola como estás"), 66.7)
-
-    def test_word_score_counts_missing_and_extra_words(self):
-        self.assertEqual(evaluation.word_score("the channels on this list", "the channels on list"), 80.0)
-        self.assertEqual(evaluation.word_score("to check", "to check the mix"), 0.0)
-
-
-class ExpectedPhonemesTests(SimpleTestCase):
-    """Real espeak-ng (installed in the image), in the same format the model answers in."""
-
-    def test_spanish_and_english(self):
-        self.assertEqual(evaluation.expected_phonemes("Hola, ¿cómo estás?", "es"), "o l a k o m o e s t a s")
-        self.assertEqual(evaluation.expected_phonemes("check the mix", "en"), "tʃ ɛ k ð ə m ɪ k s")
-
-
-EVAL_AUDIO = b"RIFF fake wav bytes"
-
-
-@override_settings(DEEPGRAM_API_KEY="test-key", SCORER_URL="https://scorer.example/", SCORER_SECRET="s")
-class EvalBenchTests(TestCase):
-    """The admin is the bench: upload and label a clip, select it, Run eval, read the scores in the list."""
+class GoldenSetTests(TestCase):
+    """Attempts are promoted into eval clips, with audio, only while eval mode (keep_audio) kept the audio."""
 
     def setUp(self):
         media = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, media, ignore_errors=True)
-        override = override_settings(MEDIA_ROOT=media)
+        override = override_settings(MEDIA_ROOT=media, DEEPGRAM_API_KEY="", SCORER_URL="")
         override.enable()
         self.addCleanup(override.disable)
-        admin_user = get_user_model().objects.create_superuser("bench", "bench@example.com", "pw-123456")
-        self.client.force_login(admin_user)
-        for target, name in [("core.scoring.phonemes_for", "scorer"), ("core.transcription.transcribe", "deepgram")]:
-            patcher = mock.patch(target)
-            setattr(self, name, patcher.start())
-            self.addCleanup(patcher.stop)
+        self.client.force_login(get_user_model().objects.create_superuser("bench", "b@example.com", "pw-123456"))
 
-    def add_clip(self, text, label, language="es"):
-        res = self.client.post(
-            "/admin/core/evalclip/add/",
-            {
-                "audio": SimpleUploadedFile("clip.wav", EVAL_AUDIO, content_type="audio/wav"),
-                "intended_text": text,
-                "language": language,
-                "label": label,
-            },
-        )
-        self.assertEqual(res.status_code, 302, res.content[:500])
-        return EvalClip.objects.order_by("-pk").first()
+    def keep_audio(self, on=True):
+        FeatureFlag.objects.filter(name="keep_audio").update(enabled=on)
 
-    def run_eval(self, *clips):
+    def record(self, content_type="audio/webm"):
+        data = self.client.post("/api/recordings/", {"audio": audio_file(content_type=content_type)}).json()
+        return data, Attempt.objects.get(pk=data["attempt_id"])
+
+    def promote(self, *attempts):
         return self.client.post(
-            "/admin/core/evalclip/",
-            {"action": "run_eval", "_selected_action": [c.pk for c in clips]},
+            "/admin/core/attempt/",
+            {"action": "promote_to_eval_clip", "_selected_action": [a.pk for a in attempts]},
             follow=True,
         )
 
-    def test_upload_label_run_eval_and_read_the_scores(self):
-        good = self.add_clip("Hola, ¿cómo estás?", "good")
-        off = self.add_clip("Hola, ¿cómo estás?", "off")
-        self.assertIsNone(good.phoneme_score, "empty until Run eval")
-        # Run eval goes through the selection newest first: the "off" clip, then the "good" one.
-        self.scorer.side_effect = [
-            {"phonemes": "o a k o m e s", "inference_ms": 1, "duration_s": 1},
-            {"phonemes": "o l a k o m o e s t a s", "inference_ms": 1, "duration_s": 1},
-        ]
-        self.deepgram.side_effect = ["hola", "Hola, cómo estás"]
+    def test_keep_audio_is_off_by_default_and_playback_deletes_as_before(self):
+        self.assertFalse(FeatureFlag.is_enabled("keep_audio"))
+        data, _ = self.record()
+        self.assertEqual(self.client.delete(f"/api/recordings/{data['id']}/").status_code, 204)
+        self.assertFalse(Recording.objects.exists())
 
-        res = self.run_eval(good, off)
+    def test_eval_mode_keeps_the_audio_and_tells_the_page(self):
+        self.keep_audio()
+        data, _ = self.record()
+        res = self.client.delete(f"/api/recordings/{data['id']}/")
+        self.assertEqual((res.status_code, res.json()), (200, {"kept": True}))
+        self.assertTrue(Recording.objects.filter(pk=data["id"]).exists())
 
-        self.assertContains(res, "Evaluated 2 clip(s).")
-        good.refresh_from_db(), off.refresh_from_db()
-        self.assertEqual((good.phoneme_score, good.word_score), (100.0, 100.0))
-        self.assertLess(off.phoneme_score, 70)
-        self.assertEqual(off.word_score, 33.3)
-        self.assertEqual(good.expected_phonemes, "o l a k o m o e s t a s")
-        self.assertEqual(good.heard_transcript, "Hola, cómo estás")
-        self.assertIsNotNone(good.evaluated_at)
-        # The real pipeline got the uploaded file's bytes, with a content type Deepgram understands.
-        self.assertEqual(self.deepgram.call_args_list[1].args, (EVAL_AUDIO, "audio/wav"))
-        self.assertEqual(self.scorer.call_args_list[1].args, (EVAL_AUDIO, "audio/wav"))
+    def test_eval_mode_pauses_the_stale_cleanup(self):
+        self.keep_audio()
+        data, _ = self.record()
+        Recording.objects.update(created_at=timezone.now() - timedelta(hours=1))
+        self.assertEqual(delete_stale_recordings(), 0)
+        self.assertTrue(Recording.objects.exists())
 
-    def test_list_shows_scores_and_label_and_filters_by_label(self):
-        good = self.add_clip("uno dos", "good")
-        self.add_clip("tres cuatro", "off")
-        EvalClip.objects.filter(pk=good.pk).update(phoneme_score=91.5, word_score=100.0)
+    def test_promote_copies_the_audio_links_the_attempt_and_leaves_the_rest_blank(self):
+        self.keep_audio()
+        _, attempt = self.record(content_type="audio/mp4")
 
-        page = self.client.get("/admin/core/evalclip/")
-        self.assertContains(page, "Phoneme score")
-        self.assertContains(page, "Word score")
-        self.assertContains(page, "91.5")
-        off_only = self.client.get("/admin/core/evalclip/?label__exact=off")
-        self.assertContains(off_only, "tres cuatro")
-        self.assertNotContains(off_only, "uno dos")
+        res = self.promote(attempt)
 
-    def test_a_down_scorer_keeps_the_word_score_and_records_why(self):
-        clip = self.add_clip("uno dos", "okay")
-        self.scorer.side_effect = scoring.ScorerError("Scorer timed out after 10s (cold start?)")
-        self.deepgram.return_value = "uno dos"
+        self.assertContains(res, "Promoted 1 attempt(s)")
+        clip = EvalClip.objects.get()
+        self.assertEqual(clip.source_attempt, attempt)
+        self.assertEqual((clip.intended_text, clip.human_label), ("", ""), "left for a human, never from Deepgram")
+        self.assertTrue(clip.audio.name.endswith(".mp4"))
+        with clip.audio.open("rb") as f:
+            self.assertEqual(f.read(), b"\x01" * 1024)
 
-        res = self.run_eval(clip)
+    def test_attempts_whose_audio_is_gone_or_already_promoted_are_skipped(self):
+        data, gone = self.record()
+        self.client.delete(f"/api/recordings/{data['id']}/")
+        self.keep_audio()
+        _, kept = self.record()
+        self.promote(kept)
 
-        self.assertContains(res, "1 had errors")
-        clip.refresh_from_db()
-        self.assertIsNone(clip.phoneme_score)
-        self.assertEqual(clip.word_score, 100.0)
-        self.assertIn("Scorer timed out", clip.eval_error)
+        res = self.promote(gone, kept)
 
-    def test_only_audio_files_are_accepted(self):
+        self.assertContains(res, "Promoted 0 attempt(s)")
+        self.assertContains(res, "1 attempt(s) skipped: their audio was already deleted")
+        self.assertContains(res, "1 attempt(s) skipped: already promoted")
+        self.assertEqual(EvalClip.objects.count(), 1)
+
+    def test_a_promoted_clip_can_then_be_labeled_in_the_admin(self):
+        self.keep_audio()
+        _, attempt = self.record()
+        self.promote(attempt)
+        clip = EvalClip.objects.get()
+
         res = self.client.post(
-            "/admin/core/evalclip/add/",
-            {"audio": SimpleUploadedFile("notes.txt", b"hi"), "intended_text": "x", "language": "es", "label": "good"},
+            f"/admin/core/evalclip/{clip.pk}/change/",
+            {"intended_text": "Hola amigo", "language": "es", "human_label": "good", "notes": "clear"},
         )
-        self.assertEqual(res.status_code, 200)
-        self.assertFalse(EvalClip.objects.exists())
 
+        self.assertEqual(res.status_code, 302, res.content[:400])
+        clip.refresh_from_db()
+        self.assertEqual((clip.intended_text, clip.human_label, clip.notes), ("Hola amigo", "good", "clear"))
+        self.assertContains(self.client.get("/admin/core/evalclip/?human_label__exact=good"), "Hola amigo")

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 RECORDING_FLAG = "recording"
 TRANSCRIPTION_FLAG = "transcription"
 LIVE_CAPTIONS_FLAG = "live_captions"
+KEEP_AUDIO_FLAG = "keep_audio"
 MAX_RECORDING_BYTES = 5 * 1024 * 1024
 ALLOWED_AUDIO_TYPES = {"audio/webm", "audio/mp4", "audio/ogg"}
 # Live captions' text comes from the page; anything longer than a 60-second clip could hold is cut.
@@ -213,6 +214,10 @@ def recording_audio(request, recording_id):
 
 @require_http_methods(["DELETE"])
 def delete_recording(request, recording_id):
+    if FeatureFlag.is_enabled(KEEP_AUDIO_FLAG):
+        # Eval mode: the audio stays so its attempt can be promoted to an eval clip; the page says so.
+        logger.info("Recording %s kept after playback (keep_audio is on)", recording_id)
+        return JsonResponse({"kept": True})
     deleted, _ = Recording.objects.filter(pk=recording_id).delete()
     if deleted:
         logger.info("Recording %s deleted after playback", recording_id)

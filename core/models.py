@@ -74,7 +74,10 @@ EVAL_AUDIO_EXTENSIONS = ["webm", "ogg", "mp4", "m4a", "mp3", "wav"]
 
 
 class EvalClip(models.Model):
-    """A hand-labeled clip for checking whether the scores agree with a human ear (the admin is the bench)."""
+    """One clip in the golden set: what was meant, and a human's judgement of how it sounded.
+
+    The bench (EvalRun / EvalResult) checks whether the pronunciation score agrees with that judgement.
+    """
 
     class Label(models.TextChoices):
         GOOD = "good", "Good"
@@ -88,30 +91,28 @@ class EvalClip(models.Model):
     audio = models.FileField(
         upload_to="eval_clips/", validators=[FileExtensionValidator(EVAL_AUDIO_EXTENSIONS)]
     )
-    intended_text = models.TextField(help_text="What the speaker meant to say.")
+    intended_text = models.TextField(
+        blank=True,
+        help_text="What the speaker meant to say, typed by a human. Never copy it from Deepgram's transcript.",
+    )
     language = models.CharField(
         max_length=2, choices=Language.choices, default=Language.SPANISH,
         help_text="Of the intended text; picks the pronunciation its expected phonemes come from.",
     )
-    label = models.CharField(max_length=4, choices=Label.choices, help_text="Your judgement, by ear.")
+    human_label = models.CharField(
+        max_length=4, choices=Label.choices, blank=True, help_text="Your judgement, by ear."
+    )
+    notes = models.TextField(blank=True)
+    source_attempt = models.ForeignKey(
+        "Attempt", null=True, blank=True, on_delete=models.SET_NULL, related_name="eval_clips",
+        help_text="Set when the clip was promoted from a real recording.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
-
-    # Filled in by the "Run eval" admin action; empty until then.
-    phoneme_score = models.FloatField(
-        null=True, blank=True, help_text="0–100: how closely the phonemes heard match the intended text's."
-    )
-    word_score = models.FloatField(
-        null=True, blank=True, help_text="0–100: 100 × (1 − word error rate) of Deepgram's transcript."
-    )
-    expected_phonemes = models.TextField(blank=True)
-    heard_phonemes = models.TextField(blank=True)
-    heard_transcript = models.TextField(blank=True)
-    eval_error = models.CharField(max_length=500, blank=True)
-    evaluated_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
         verbose_name = "eval clip"
 
     def __str__(self):
-        return f"{self.get_label_display()}: {self.intended_text[:40]}"
+        label = self.get_human_label_display() or "Unlabeled"
+        return f"{label}: {self.intended_text[:40] or '(no intended text yet)'}"

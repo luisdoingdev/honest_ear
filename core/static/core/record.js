@@ -168,7 +168,9 @@
     if (!recording) return;
     const { id } = recording;
     recording = null;
-    await fetch(`/api/recordings/${id}/`, { method: "DELETE", headers: { "X-CSRFToken": csrfToken } });
+    const response = await fetch(`/api/recordings/${id}/`, { method: "DELETE", headers: { "X-CSRFToken": csrfToken } });
+    // 200 {"kept": true}: eval mode kept the audio (see the keep_audio flag); 204: deleted.
+    return response.status === 200 && (await response.json()).kept === true;
   }
 
   async function startListening() {
@@ -276,8 +278,12 @@
     URL.revokeObjectURL(audio.src);
     audio.removeAttribute("src");
     try {
-      await deleteRecording();
-      setStatus(gettext("Deleted. Tap the mic to record again."));
+      const kept = await deleteRecording();
+      setStatus(
+        kept
+          ? gettext("Kept for evaluation. Tap the mic to record again.")
+          : gettext("Deleted. Tap the mic to record again."),
+      );
     } catch {
       setStatus(gettext("Played, but deleting failed. It will be removed automatically."), true);
     }

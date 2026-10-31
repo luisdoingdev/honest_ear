@@ -1,13 +1,15 @@
 import logging
 
 from django.contrib import admin, messages
+from django.core.files.base import ContentFile
 from django.utils.html import format_html
 
-from . import evaluation
 from .models import Attempt, EvalClip, FeatureFlag, Recording
 
 logger = logging.getLogger(__name__)
 
+# mimetypes would give .weba for audio/webm, which the eval clip's audio validator rejects.
+RECORDING_EXTENSIONS = {"audio/webm": ".webm", "audio/mp4": ".mp4", "audio/ogg": ".ogg"}
 
 @admin.register(FeatureFlag)
 class FeatureFlagAdmin(admin.ModelAdmin):
@@ -38,8 +40,39 @@ class RecordingAdmin(admin.ModelAdmin):
 
 @admin.register(Attempt)
 class AttemptAdmin(admin.ModelAdmin):
-    list_display = ("created_at", "transcript_source", "transcript", "phonemes", "audio_duration_s")
+    list_display = ("created_at", "transcript_source", "transcript", "phonemes", "audio_duration_s", "has_audio")
     list_filter = ("transcript_source",)
+    actions = ["promote_to_eval_clip"]
+
+    @admin.display(description="Audio kept", boolean=True)
+    def has_audio(self, obj):
+        return obj.recording_id is not None
+
+    @admin.action(description="Promote to EvalClip")
+    def promote_to_eval_clip(self, request, queryset):
+        """Copies the audio and links the attempt; intended text and label are left for a human to fill in."""
+        promoted, no_audio, already = 0, 0, 0
+        for attempt in queryset.select_related("recording"):
+            if attempt.recording is None:
+                no_audio += 1
+            elif attempt.eval_clips.exists():
+                already += 1
+            else:
+                recording = attempt.recording
+                extension = RECORDING_EXTENSIONS.get(recording.content_type, ".webm")
+                clip = EvalClip(source_attempt=attempt)
+                clip.audio.save(f"attempt-{attempt.pk}{extension}", ContentFile(bytes(recording.audio)), save=True)
+                promoted += 1
+        self.message_user(request, f"Promoted {promoted} attempt(s) to eval clips. Type their intended text and label them.")
+        if no_audio:
+            self.message_user(
+                request,
+                f"{no_audio} attempt(s) skipped: their audio was already deleted. "
+                "Turn on the keep_audio feature flag to keep audio for new recordings.",
+                messages.WARNING,
+            )
+        if already:
+            self.message_user(request, f"{already} attempt(s) skipped: already promoted.", messages.INFO)
     readonly_fields = [field.name for field in Attempt._meta.fields]
 
     def has_add_permission(self, request):
@@ -51,51 +84,27 @@ class AttemptAdmin(admin.ModelAdmin):
 
 @admin.register(EvalClip)
 class EvalClipAdmin(admin.ModelAdmin):
-    """The labeling bench: upload a clip, type what was meant, label it by ear, then "Run eval" on a selection."""
+    """The golden set: upload or promote a clip, type what was meant, label it by ear."""
 
-    list_display = ("short_text", "language", "label", "phoneme_score", "word_score", "evaluated_at", "has_error")
+    list_display = ("short_text", "language", "human_label", "source", "created_at")
     list_display_links = ("short_text",)
-    list_editable = ("label",)
-    list_filter = ("label", "language", ("evaluated_at", admin.EmptyFieldListFilter))
-    search_fields = ("intended_text", "heard_transcript")
-    actions = ["run_eval"]
-    readonly_fields = (
-        "player", "phoneme_score", "word_score", "expected_phonemes", "heard_phonemes",
-        "heard_transcript", "eval_error", "evaluated_at", "created_at",
-    )
-    fieldsets = (
-        (None, {"fields": ("audio", "player", "intended_text", "language", "label")}),
-        ("Scores (filled in by Run eval)", {"fields": ("phoneme_score", "word_score", "evaluated_at", "eval_error")}),
-        ("What the pipeline heard", {"fields": ("expected_phonemes", "heard_phonemes", "heard_transcript")}),
-    )
+    list_editable = ("human_label",)
+    list_filter = ("human_label", "language", ("source_attempt", admin.EmptyFieldListFilter))
+    search_fields = ("intended_text", "notes")
+    readonly_fields = ("player", "source_attempt", "created_at")
+    fields = ("audio", "player", "intended_text", "language", "human_label", "notes", "source_attempt", "created_at")
 
     @admin.display(description="Intended text", ordering="intended_text")
     def short_text(self, obj):
-        return obj.intended_text if len(obj.intended_text) <= 60 else obj.intended_text[:57] + "…"
+        text = obj.intended_text or "(to type)"
+        return text if len(text) <= 60 else text[:57] + "…"
 
-    @admin.display(description="Error", boolean=True)
-    def has_error(self, obj):
-        return bool(obj.eval_error) if obj.evaluated_at else None
+    @admin.display(description="Source", ordering="source_attempt")
+    def source(self, obj):
+        return "promoted" if obj.source_attempt_id else "uploaded"
 
     @admin.display(description="Listen")
     def player(self, obj):
         if not obj.audio:
             return "—"
         return format_html('<audio controls preload="none" src="{}"></audio>', obj.audio.url)
-
-    @admin.action(description="Run eval on the selected clips")
-    def run_eval(self, request, queryset):
-        failed = 0
-        for clip in queryset:
-            evaluation.evaluate(clip)
-            failed += bool(clip.eval_error)
-        done = queryset.count()
-        if failed:
-            self.message_user(
-                request,
-                f"Evaluated {done} clip(s); {failed} had errors (see the Error column and each clip's eval error).",
-                messages.WARNING,
-            )
-        else:
-            self.message_user(request, f"Evaluated {done} clip(s).", messages.SUCCESS)
-

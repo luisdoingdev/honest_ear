@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Honest Ear\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 21:19+0000\n"
+"POT-Creation-Date: 2026-10-31 15:10+0000\n"
 "PO-Revision-Date: 2026-10-30 17:30+0000\n"
 "Last-Translator: Honest Ear\n"
 "Language-Team: Spanish\n"
@@ -15,28 +15,28 @@ msgstr ""
 "Plural-Forms: nplurals=3; plural=n == 1 ? 0 : n != 0 && n % 1000000 == 0 ? "
 "1 : 2;\n"
 
-#: static/core/record.js:34
+#: static/core/record.js:36
 msgid "Start session"
 msgstr "Empezar"
 
-#: static/core/record.js:34
+#: static/core/record.js:36
 msgid "Stop"
 msgstr "Detener"
 
-#: static/core/record.js:35
+#: static/core/record.js:37
 msgid "Record again"
 msgstr "Grabar otra vez"
 
-#: static/core/record.js:55
+#: static/core/record.js:57
 #, javascript-format
 msgid "Listening… %s"
 msgstr "Escuchando… %s"
 
-#: static/core/record.js:75
+#: static/core/record.js:83
 msgid "No speech detected."
 msgstr "No se detectó voz."
 
-#: static/core/record.js:175
+#: static/core/record.js:185
 msgid ""
 "Microphone access was denied. Allow it in your browser settings and try "
 "again."
@@ -44,42 +44,46 @@ msgstr ""
 "No se permitió el acceso al micrófono. Actívalo en la configuración del "
 "navegador y vuelve a intentarlo."
 
-#: static/core/record.js:199
+#: static/core/record.js:210
 msgid "Transcribing…"
 msgstr "Transcribiendo…"
 
-#: static/core/record.js:230
+#: static/core/record.js:242
 msgid "Tap Play to hear it. It's deleted when it finishes."
 msgstr "Toca Reproducir para escucharla. Se borra cuando termina."
 
-#: static/core/record.js:234
+#: static/core/record.js:246
 #, javascript-format
 msgid "Upload failed: %s"
 msgstr "No se pudo subir: %s"
 
-#: static/core/record.js:240
+#: static/core/record.js:252
 msgid "Recording needs a secure connection. Open this page over HTTPS."
 msgstr ""
 "Para grabar se necesita una conexión segura. Abre esta página con HTTPS."
 
-#: static/core/record.js:246
+#: static/core/record.js:258
 msgid "This browser can't record audio. Try a recent Chrome or Safari."
 msgstr ""
 "Este navegador no puede grabar audio. Prueba con una versión reciente de "
 "Chrome o Safari."
 
-#: static/core/record.js:258
+#: static/core/record.js:270
 msgid "Playing…"
 msgstr "Reproduciendo…"
 
-#: static/core/record.js:260
+#: static/core/record.js:272
 msgid "Couldn't play the recording."
 msgstr "No se pudo reproducir la grabación."
 
-#: static/core/record.js:270
+#: static/core/record.js:284
+msgid "Kept for evaluation. Tap the mic to record again."
+msgstr "Se guardó para evaluación. Toca el micrófono para grabar otra vez."
+
+#: static/core/record.js:285
 msgid "Deleted. Tap the mic to record again."
 msgstr "Borrada. Toca el micrófono para grabar otra vez."
 
-#: static/core/record.js:272
+#: static/core/record.js:288
 msgid "Played, but deleting failed. It will be removed automatically."
 msgstr "Se reprodujo, pero no se pudo borrar. Se eliminará automáticamente."
