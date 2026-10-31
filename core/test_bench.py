@@ -2,10 +2,13 @@
 
 import shutil
 import tempfile
+from io import StringIO
+from pathlib import Path
 from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
+from django.core.management import CommandError, call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from . import bench, pronunciation, scoring
@@ -71,7 +74,7 @@ class RunBenchTests(TestCase):
             self.addCleanup(patcher.stop)
         # Each clip's audio is its own key, so the fakes answer per clip.
         self.scorer.side_effect = lambda audio, _: self.heard[audio]["scorer"]
-        self.deepgram.side_effect = lambda audio, _: self.heard[audio]["deepgram"]
+        self.deepgram.side_effect = lambda audio, _, language: self.heard[audio]["deepgram"]
 
     def clip(self, name, text, label, transcript, phonemes, duration=2.0):
         clip = EvalClip(intended_text=text, language="es", human_label=label)
@@ -101,6 +104,8 @@ class RunBenchTests(TestCase):
         self.assertEqual(by_name["good"].alignment[0]["word"], "hola")
         self.assertEqual(run.summary["judged"], 2)
         self.assertEqual(run.summary["agreement"], 100.0)
+        # Deepgram is told each clip's language instead of guessing it (multi).
+        self.assertEqual({c.kwargs["language"] for c in self.deepgram.call_args_list}, {"es"})
 
     def test_the_label_at_run_time_is_kept(self):
         clip = self.clip("a", "hola", "good", "hola", "o l a")
@@ -224,3 +229,38 @@ class ReportTests(TestCase):
         self.assertContains(page, f"/admin/core/evalclip/{clip.pk}/change/")
         self.assertContains(page, "ɣ→ɡ")
         self.assertContains(self.client.get("/admin/core/evalrun/"), f'href="{self.url}"')
+
+
+class WriteEvalSummaryTests(TestCase):
+    def readme(self, text):
+        path = Path(tempfile.mkdtemp()) / "README.md"
+        path.write_text(text)
+        self.addCleanup(shutil.rmtree, path.parent, ignore_errors=True)
+        return path
+
+    def make_run(self, agreement):
+        summary = bench.summarize([result(human="good", band="good", per=0.05, subs=[("ɣ", "ɡ")])])
+        summary["agreement"] = agreement
+        return EvalRun.objects.create(config_version="1", config={}, summary=summary)
+
+    def test_adds_an_evals_section_then_replaces_only_its_own_block(self):
+        path = self.readme("# Honest Ear\n\nIntro.\n")
+        self.make_run(100.0)
+        call_command("write_eval_summary", readme=str(path), stdout=StringIO())
+        first = path.read_text()
+        self.assertIn("## Evals", first)
+        self.assertIn("**Agreement** (predicted band = human label): 100.0%", first)
+        self.assertIn("`ɣ→ɡ` ×1", first)
+
+        path.write_text(first + "\n## Later section\n\nKept.\n")
+        self.make_run(50.0)
+        call_command("write_eval_summary", readme=str(path), stdout=StringIO())
+        second = path.read_text()
+        self.assertIn("50.0%", second)
+        self.assertNotIn("100.0%", second)
+        self.assertEqual(second.count("## Evals"), 1)
+        self.assertIn("## Later section\n\nKept.", second)
+
+    def test_without_runs_it_says_so(self):
+        with self.assertRaisesMessage(CommandError, "No eval runs yet"):
+            call_command("write_eval_summary", readme=str(self.readme("x")), stdout=StringIO())

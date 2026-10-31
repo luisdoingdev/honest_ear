@@ -27,15 +27,18 @@ def is_configured():
     return bool(settings.DEEPGRAM_API_KEY)
 
 
-def transcribe(audio, content_type):
-    """Send a recording to Deepgram's pre-recorded API and return the transcript ("" when silent)."""
+def transcribe(audio, content_type, language=LANGUAGE):
+    """Send a recording to Deepgram's pre-recorded API and return the transcript ("" when silent).
+
+    `language` defaults to multi (visitors mix Spanish and English); the eval bench passes the clip's known language.
+    """
     try:
         response = httpx.post(
             DEEPGRAM_URL,
             # Streaming-only options (interim_results, endpointing) make this endpoint return 400.
             params={
                 "model": settings.DEEPGRAM_MODEL,
-                "language": LANGUAGE,
+                "language": language,
                 "smart_format": "true",
                 # Keep recordings out of Deepgram's Model Improvement Program.
                 "mip_opt_out": "true",

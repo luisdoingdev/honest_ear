@@ -51,7 +51,7 @@ def evaluate_clip(run, clip, config):
     # Both services at once, as for a live recording.
     with ThreadPoolExecutor(max_workers=1) as pool:
         heard = pool.submit(_phonemes, audio, content_type)
-        transcript, transcript_error = _transcript(audio, content_type)
+        transcript, transcript_error = _transcript(audio, content_type, clip.language)
         phonemes, scorer_error = heard.result()
     result.transcript = transcript or ""
     if phonemes:
@@ -94,11 +94,13 @@ def _save(result, **fields):
     return result
 
 
-def _transcript(audio, content_type):
+def _transcript(audio, content_type, language):
     if not transcription.is_configured():
         return None, "Deepgram not configured (DEEPGRAM_API_KEY)"
     try:
-        return transcription.transcribe(audio, content_type), ""
+        # The clip's known language, not multi: with multi, a heavily accented clip can be transcribed as
+        # another language entirely (Japanese-accented Spanish came back in katakana) and fail the gate.
+        return transcription.transcribe(audio, content_type, language=language), ""
     except transcription.TranscriptionError as exc:
         return None, str(exc)
 

@@ -63,12 +63,13 @@ def expected_phonemes(text, language):
         text_words,
         language=ESPEAK_VOICES[language],
         backend="espeak",
-        separator=Separator(phone=" ", word="", syllable=""),
+        # Each line is one word; a distinct word separator keeps phonemizer's word-count check quiet.
+        separator=Separator(phone=" ", word=" | ", syllable=""),
         strip=True,
         preserve_punctuation=False,
         with_stress=False,
     )
-    return [(word, phonemes.split()) for word, phonemes in zip(text_words, phonemized)]
+    return [(word, [t for t in phonemes.split() if t != "|"]) for word, phonemes in zip(text_words, phonemized)]
 
 
 def align(expected_words, heard):
