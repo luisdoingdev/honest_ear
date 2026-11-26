@@ -1,0 +1,4 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+main { max-width: 42rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+section { margin-top: 2rem; }
+pre { background: color-mix(in srgb, currentColor 8%, transparent); padding: 0.75rem; min-height: 3rem; }

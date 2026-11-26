@@ -1,15 +1,9 @@
 .env
+certs/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
 staticfiles/
 .venv/
-celerybeat-schedule*
-
-# Playwright generated files
-node_modules/
-test-results/
-playwright-report/
-e2e/tests/*-snapshots/
-
-# Compiled translations (built from the .po files)
-*.mo
+.DS_Store

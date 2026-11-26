@@ -1,0 +1,90 @@
+# Rendered by the nginx image at startup (envsubst, filtered to HTTPS_PORT) into
+# /etc/nginx/conf.d/default.conf. Nginx variables like $host are left untouched.
+
+# Docker's embedded DNS. `resolve` on the upstream servers re-checks it, so scaling
+# `web` up or down (WEB_REPLICAS) is picked up without restarting nginx.
+resolver 127.0.0.11 valid=5s ipv6=off;
+
+upstream django {
+    zone django 64k;
+    least_conn;
+    server web:8000 resolve;
+}
+
+upstream flower {
+    zone flower 64k;
+    server flower:5555 resolve;
+}
+
+upstream mailpit {
+    zone mailpit 64k;
+    server mailpit:8025 resolve;
+}
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# Certs come from mkcert (./start.sh).
+ssl_certificate     /certs/honest-ear.pem;
+ssl_certificate_key /certs/honest-ear-key.pem;
+ssl_protocols       TLSv1.2 TLSv1.3;
+
+# Shared proxy settings. Don't add proxy_set_header inside a location: that would
+# drop all of these for that location.
+proxy_http_version 1.1;
+proxy_set_header Host              $http_host;
+proxy_set_header X-Real-IP         $remote_addr;
+proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header Upgrade           $http_upgrade;     # WebSockets (Channels, Mailpit)
+proxy_set_header Connection        $connection_upgrade;
+proxy_read_timeout 1h;                                # long-lived WebSockets / event streams
+# If a replica is down (e.g. mid auto-reload), retry the request on another one.
+proxy_next_upstream error timeout http_502 http_503;
+
+server {
+    listen 80 default_server;
+    server_name _;
+    return 301 https://$host:${HTTPS_PORT}$request_uri;
+}
+
+server {
+    listen 443 ssl default_server;
+    http2 on;
+    server_name honest-ear.localhost;
+
+    client_max_body_size 50m;
+
+    # Which replica answered: handy to see the load balancing working.
+    add_header X-Upstream $upstream_addr always;
+
+    location / {
+        proxy_pass http://django;
+    }
+
+    # django-browser-reload's event stream must not be buffered.
+    location /__reload__/ {
+        proxy_pass http://django;
+        proxy_buffering off;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name flower.honest-ear.localhost;
+    location / {
+        proxy_pass http://flower;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name mail.honest-ear.localhost;
+    location / {
+        proxy_pass http://mailpit;
+    }
+}
