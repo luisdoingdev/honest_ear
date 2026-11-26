@@ -1,0 +1,48 @@
+{% extends "core/base.html" %}
+
+{% block content %}
+<h1>Honest Ear</h1>
+<p>Django + Uvicorn (ASGI) + Channels + Celery + Postgres + Redis.</p>
+
+<section>
+  <h2>Background task (HTMX → Celery)</h2>
+  <button hx-post="{% url 'ping' %}" hx-target="#tasks" hx-swap="afterbegin">Queue ping task</button>
+  <ul id="tasks"></ul>
+</section>
+
+<section>
+  <h2>WebSocket echo (Channels)</h2>
+  <form id="ws-form">
+    <input id="ws-input" placeholder="Say something" autocomplete="off">
+    <button type="submit">Send</button>
+  </form>
+  <pre id="ws-log"></pre>
+</section>
+
+<section>
+  <h2>Links</h2>
+  <ul>
+    <li><a href="/api/docs">API docs</a></li>
+    <li><a href="/admin/">Admin</a></li>
+    <li><a href="https://flower.{{ request.get_host }}">Flower</a></li>
+    <li><a href="https://mail.{{ request.get_host }}">Mailpit</a></li>
+  </ul>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const log = document.getElementById("ws-log");
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${scheme}://${location.host}/ws/echo/`);
+  socket.onopen = () => (log.textContent += "connected\n");
+  socket.onclose = () => (log.textContent += "disconnected\n");
+  socket.onmessage = (e) => (log.textContent += `← ${JSON.parse(e.data).echo.text}\n`);
+  document.getElementById("ws-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.getElementById("ws-input");
+    socket.send(JSON.stringify({ text: input.value }));
+    input.value = "";
+  });
+</script>
+{% endblock %}

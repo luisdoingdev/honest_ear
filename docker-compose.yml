@@ -1,5 +1,11 @@
+name: honest-ear
+
 x-app: &app
-  build: .
+  build:
+    context: .
+    args:
+      DEV: "true"
+  image: honest-ear/app:dev
   env_file: .env
   volumes:
     - .:/app
@@ -9,48 +15,89 @@ x-app: &app
     redis:
       condition: service_healthy
 
+# `docker compose watch` (./start.sh --watch) rebuilds when dependencies change.
+# Code changes don't need it: the bind mount + reloaders pick them up.
+x-rebuild-on-deps: &rebuild-on-deps
+  watch:
+    - action: rebuild
+      path: requirements.txt
+    - action: rebuild
+      path: requirements-dev.txt
+    - action: rebuild
+      path: Dockerfile
+
+x-after-migrate: &after-migrate
+  db:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
 services:
+  # One-shot: runs migrations once, so web replicas don't race each other doing it.
+  migrate:
+    <<: *app
+    command: python manage.py migrate --noinput
+    restart: "no"
+
+  # Load-balanced by nginx. Scale with WEB_REPLICAS in .env.
   web:
     <<: *app
+    develop: *rebuild-on-deps
+    deploy:
+      replicas: ${WEB_REPLICAS:-2}
+    depends_on: *after-migrate
+    # Keep every line at the same indent: in a folded (>) block, deeper-indented lines keep
+    # their newlines and sh would run them as separate commands.
     command: >
-      sh -c "python manage.py compilemessages -v 0 &&
-             python manage.py migrate --noinput &&
-             python manage.py ensure_superuser &&
-             exec python manage.py runserver 0.0.0.0:8000"
-    ports:
-      - "8000:8000"
+      uvicorn config.asgi:application --host 0.0.0.0 --port 8000
+      --reload --reload-include '*.html' --reload-include '*.css' --reload-include '*.js'
+      --proxy-headers --forwarded-allow-ips '*'
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 5s
       timeout: 5s
-      retries: 20
+      start_period: 30s
+      retries: 10
 
-  e2e:
-    image: mcr.microsoft.com/playwright:v1.64.1-noble
-    profiles: ["test"]
-    working_dir: /e2e
-    entrypoint: ["sh", "/e2e/run.sh"]
-    env_file: .env
+  worker:
+    <<: *app
+    command: watchfiles --filter python "celery -A config worker --loglevel=info" /app
+
+  beat:
+    <<: *app
+    command: watchfiles --filter python "celery -A config beat --loglevel=info" /app
+    depends_on: *after-migrate  # django_celery_beat tables must exist first
+
+  flower:
+    <<: *app
+    command: celery -A config flower --port=5555
+
+  # TLS termination + load balancer for the web replicas (nginx/templates/).
+  nginx:
+    image: nginx:1.29-alpine
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
     environment:
-      BASE_URL: http://localhost:8000
-      CI: ${CI:-}
-    # Share web's network so tests use localhost: browsers only allow the microphone on HTTPS or localhost.
-    network_mode: "service:web"
-    ipc: host
+      HTTPS_PORT: ${HTTPS_PORT:-443}
+      NGINX_ENVSUBST_FILTER: ^HTTPS_PORT$
     volumes:
-      - ./e2e:/e2e
-      - e2e_node_modules:/e2e/node_modules
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - ${CERTS_DIR:-./certs}:/certs:ro
     depends_on:
       web:
         condition: service_healthy
-
-  celery:
-    <<: *app
-    command: celery -A config worker --loglevel=info
-
-  celery-beat:
-    <<: *app
-    command: celery -A config beat --loglevel=info --schedule /tmp/celerybeat-schedule
+      flower:
+        condition: service_started
+      mailpit:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--no-check-certificate", "https://127.0.0.1/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   db:
     image: postgres:17
@@ -60,10 +107,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -72,15 +117,19 @@ services:
     image: redis:7-alpine
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+  mailpit:
+    image: axllent/mailpit:latest
+
+networks:
+  default:
+    name: honest-ear
+
 volumes:
   postgres_data:
   redis_data:
-  e2e_node_modules:
